@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# uv, when it is pointed at the checkout (sandbox / CI friendly)
+.uv-cache/
+.uv-python/
+.uv-python-cache/
+.venv/
+
+# tool output
+*.csv
+*.parquet
+*.pkl
+!tests/data/*.csv
