@@ -226,7 +226,7 @@ class TestWalkRealFS(TempDirTestCase):
         self.assertIn(self.key(self.root / ".hidden"), got)
         self.assertEqual(got[self.key(self.root)].size, 5)
 
-    def test_real_symlink_is_not_followed_for_size(self):
+    def test_real_symlink_reports_zero_size(self):
         target = self.root / "target.bin"
         target.write_bytes(b"z" * 1000)
         link = self.root / "link.bin"
@@ -234,10 +234,44 @@ class TestWalkRealFS(TempDirTestCase):
             os.symlink(target, link)
         except (OSError, NotImplementedError):
             self.skipTest("symlinks unavailable")
+
+        # If the platform reports the link as a regular file, the symlink was
+        # not actually created (Windows without developer mode, or an MSYS2
+        # runtime configured to copy).  There is nothing to assert then.
+        if not os.path.islink(link):
+            self.skipTest("platform did not create a real symlink")
+
         got = _by_path(self.root)
-        # The link must not double-count the target's bytes.
+        link_entry = got[self.key(link)]
+
+        # Two separate concerns must both hold.
+        self.assertEqual(link_entry.type, "link")
+        # 1. The target's bytes must not be counted twice.
         self.assertEqual(got[self.key(self.root)].size, 1000)
-        self.assertEqual(got[self.key(link)].type, "link")
+        # 2. The link's own size must not be its target *string* length.
+        #    On POSIX, lstat().st_size for a symlink is the byte length of the
+        #    path it points at, which is metadata rather than data and would
+        #    otherwise inflate every directory containing links.
+        self.assertEqual(link_entry.size, 0)
+
+    def test_symlink_size_never_depends_on_target_path_length(self):
+        (self.root / "t").write_bytes(b"x" * 10)
+        long_dir = self.root / ("d" * 80)
+        long_dir.mkdir()
+        (long_dir / "t2").write_bytes(b"y" * 10)
+
+        short_link = self.root / "short"
+        deep_link = self.root / "deep"
+        try:
+            os.symlink(self.root / "t", short_link)
+            os.symlink(long_dir / "t2", deep_link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        if not (os.path.islink(short_link) and os.path.islink(deep_link)):
+            self.skipTest("platform did not create real symlinks")
+
+        got = _by_path(self.root)
+        self.assertEqual(got[self.key(short_link)].size, got[self.key(deep_link)].size)
 
     def test_hashing_matches_file_contents(self):
         import hashlib

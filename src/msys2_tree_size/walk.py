@@ -430,13 +430,25 @@ def _measure_leaf(
     hash_contents: bool,
     on_error: ErrorCallback | None,
 ) -> Entry:
-    """Measure a non-directory entry, tolerating unreadable objects."""
+    """Measure a non-directory entry, tolerating unreadable objects.
+
+    Symlinks report size ``0`` deliberately.  On POSIX, ``lstat().st_size`` of a
+    symlink is the byte length of the path it *points at* — metadata, not data.
+    Reporting it would make a directory's total change when a link's target name
+    changed length, and would make the same link appear to consume different
+    amounts of space on different systems.  Counting the target's real bytes is
+    wrong too, since those already appear under the target's own path.
+
+    This was caught by CI: a 1000-byte file plus a relative symlink to it
+    summed to 1126 on Linux, where the link's target string is 126 bytes.
+    """
     error: str | None = None
     size = 0
 
     try:
         st = fs.stat(path)
-        size = int(getattr(st, "st_size", 0) or 0)
+        if kind != LINK:
+            size = int(getattr(st, "st_size", 0) or 0)
     except OSError as exc:
         error = str(exc)
         if on_error is not None:

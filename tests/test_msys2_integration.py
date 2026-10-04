@@ -47,47 +47,66 @@ def _drive_mount_ok() -> bool:
 
 
 class TestMsys2Platform(TempDirTestCase):
-    def test_platform_is_msys(self):
+    def test_platform_is_recognised_as_a_posix_runtime(self):
         if not _is_msys2():
-            self.skipTest("not running under MSYS2")
-        self.assertEqual(sys.platform, "msys")
+            self.skipTest("not running under an MSYS2/Cygwin runtime Python")
+        # MSYS2's own Python reports "msys"; the GitHub Actions MSYS2 images
+        # report "cygwin".  Both are POSIX runtime interpreters and both must be
+        # accepted, so the assertion is membership rather than equality.
+        self.assertIn(sys.platform, ("msys", "cygwin"))
 
     def test_posix_paths_are_reported(self):
         if not _is_msys2():
-            self.skipTest("not running under MSYS2")
+            self.skipTest("not running under an MSYS2/Cygwin runtime Python")
         root = self.make_temp_dir()
         (root / "f.txt").write_bytes(b"hello")
         entries = list(walk.walk(str(root)))
         self.assertTrue(entries)
+        # A POSIX runtime must report POSIX paths, never a "C:\..." rendering.
         for entry in entries:
             self.assertTrue(entry.path.startswith("/"), entry.path)
+            self.assertNotIn("\\", entry.path, entry.path)
 
     def test_drive_mount_is_usable(self):
+        if not _is_msys2():
+            self.skipTest("not running under an MSYS2/Cygwin runtime Python")
         if not _drive_mount_ok():
-            self.skipTest("/c mount unavailable")
+            self.skipTest("/c mount unavailable in this runtime")
         self.assertTrue(os.path.isdir("/c/"))
 
 
 class TestDriveLetterEquivalence(TempDirTestCase):
-    """``C:\\x`` and ``/c/x`` must name the same directory under MSYS2."""
+    """``C:\\x`` and ``/c/x`` must name the same directory under MSYS2.
+
+    The two spellings are built explicitly rather than by string-replacing the
+    platform's own rendering, because that rendering differs between MSYS2's
+    ``/c/...`` and Cygwin's ``/cygdrive/c/...``.  Deriving them from
+    ``paths.to_posix`` / ``paths.from_posix`` keeps the test about *equivalence*
+    instead of about which runtime is in use.
+    """
+
+    def windows_spelling(self, path) -> str:
+        return paths.from_posix(paths.to_posix(str(path)))
 
     def test_both_spellings_walk_the_same_tree(self):
         if not _is_msys2():
-            self.skipTest("not running under MSYS2")
+            self.skipTest("not running under an MSYS2/Cygwin runtime Python")
         root = self.make_temp_dir()
         (root / "f.txt").write_bytes(b"x" * 12)
 
         posix = paths.to_posix(str(root))
-        windows = str(root).replace("/", "\\")
+        windows = self.windows_spelling(root)
+        if windows == posix:
+            self.skipTest("this runtime reports paths only one way")
 
         from_posix = {e.path for e in walk.walk(posix)}
         from_windows = {e.path for e in walk.walk(windows)}
+        self.assertTrue(from_posix, "POSIX spelling produced no entries")
         self.assertEqual(from_posix, from_windows)
-        self.assertTrue(from_posix)
 
     def test_totals_agree_across_spellings(self):
         if not _is_msys2():
-            self.skipTest("not running under MSYS2")
+            self.skipTest("not running under an MSYS2/Cygwin runtime Python")
         root = self.make_temp_dir()
         (root / "a").write_bytes(b"x" * 100)
         sub = root / "sub"
@@ -96,11 +115,13 @@ class TestDriveLetterEquivalence(TempDirTestCase):
 
         def total(path):
             entries = list(walk.walk(path))
+            self.assertTrue(entries, f"no entries for {path!r}")
             return max(e.size for e in entries)
 
-        self.assertEqual(total(str(root)), 300)
-        self.assertEqual(total(str(root).replace("/", "\\")), 300)
         self.assertEqual(total(paths.to_posix(str(root))), 300)
+        windows = self.windows_spelling(root)
+        if windows != paths.to_posix(str(root)):
+            self.assertEqual(total(windows), 300)
 
 
 class TestByteExactFilenames(TempDirTestCase):
