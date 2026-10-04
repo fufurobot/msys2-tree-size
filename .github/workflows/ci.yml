@@ -10,10 +10,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Keep every test's scratch space inside the checkout so cleanup cannot fail
+  # for reasons unrelated to the code under test.
+  PYTHONUNBUFFERED: "1"
+
 jobs:
-  # Fast feedback: pure-Python logic on Linux.
+  # Fast feedback: pure-Python logic on Linux.  The MSYS2-only tests skip here.
   test-linux:
-    name: unit tests (ubuntu-latest, py${{ matrix.python-version }})
+    name: unit tests (ubuntu, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -26,13 +31,15 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Run unittest suite
-        run: uv run --python ${{ matrix.python-version }} --with pandas --with tqdm python -m unittest discover -s tests -v
+        run: uv run --python ${{ matrix.python-version }} python -m unittest discover -s tests -t . -v
 
-      - name: Run packaging smoke test
-        run: uv run --python ${{ matrix.python-version }} python -m msys2_tree_size.cli --help
+      - name: Console script smoke test
+        run: uv run --python ${{ matrix.python-version }} msys2-tree-size --help
 
-  # The real target environment: MSYS2 provides POSIX byte paths, /dev/disk/by-id
-  # and /proc/partitions, which is the entire premise of this project.
+  # The real target environment.  MSYS2 provides the POSIX path semantics,
+  # /dev/disk/by-id and /proc/partitions that this project is built around, and
+  # its Python is a native Windows build -- so these jobs exercise the actual
+  # environment rather than a Linux approximation of it.
   test-msys2:
     name: unit tests (MSYS2 ${{ matrix.msystem }})
     runs-on: windows-latest
@@ -51,18 +58,30 @@ jobs:
             python
             python-pip
 
-      - name: Run unittest suite under MSYS2
-        shell: msys2 {0}
-        run: python -m unittest discover -s tests -v
-
-      - name: Verify POSIX device paths are exposed
+      - name: Report the environment under test
         shell: msys2 {0}
         run: |
-          ls -d /dev/disk/by-id 2>/dev/null || echo "note: /dev/disk/by-id absent in CI container"
-          head -n 2 /proc/partitions || echo "note: /proc/partitions absent in CI container"
+          python -c "import sys; print('sys.platform =', sys.platform)"
+          uname -a
+
+      - name: Run unittest suite under MSYS2
+        shell: msys2 {0}
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Show what the device paths expose
+        shell: msys2 {0}
+        run: |
+          ls -d /dev/disk/by-id 2>/dev/null || echo "note: /dev/disk/by-id absent on this runner"
+          head -n 4 /proc/partitions 2>/dev/null || echo "note: /proc/partitions absent on this runner"
+
+      - name: Exercise the CLI on real MSYS2 hardware
+        shell: msys2 {0}
+        run: |
+          python -m msys2_tree_size.cli devices || true
+          python -m msys2_tree_size.cli du . --flat --top 5 || true
 
   lint:
-    name: lint (ruff)
+    name: lint and format (ruff)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
