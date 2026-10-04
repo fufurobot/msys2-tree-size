@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import unittest
 
-from support import TempDirTestCase
-
 from msys2_tree_size import duplicates  # noqa: E402
 from msys2_tree_size.walk import Entry
 
@@ -75,13 +73,15 @@ class TestFindDuplicates(unittest.TestCase):
 
     def test_groups_are_sorted_deterministically(self):
         rows = [
-            entry("/r/z", sha256="h2"),
-            entry("/r/a", sha256="h1"),
-            entry("/r/b", sha256="h1"),
+            entry("/r/z", sha256="h2", size=1),
+            entry("/r/a", sha256="h1", size=1),
+            entry("/r/b", sha256="h1", size=1),
+            entry("/r/y", sha256="h2", size=1),
         ]
         groups = duplicates.find_duplicates(rows)
         self.assertEqual([g[0].sha256 for g in groups], ["h1", "h2"])
         self.assertEqual([r.path for r in groups[0]], ["/r/a", "/r/b"])
+        self.assertEqual([r.path for r in groups[1]], ["/r/y", "/r/z"])
 
     def test_directories_are_included(self):
         # Two identical subtrees are genuinely duplicated content.
@@ -157,22 +157,33 @@ class TestDuplicateSummary(unittest.TestCase):
 
 
 class TestCrossDevice(unittest.TestCase):
+    """``find_duplicates`` returns entries; device metadata lands on rows."""
+
     def test_same_hash_across_devices_flagged(self):
         rows = [
             entry("/d1/a", sha256="h", size=10),
             entry("/d2/b", sha256="h", size=10),
         ]
         groups = duplicates.find_duplicates(rows, device_of=lambda p: p.split("/")[1])
-        self.assertTrue(groups[0][0].cross_device or _cross_device(groups[0]))
+        out = duplicates.to_rows(groups, device_of=lambda p: p.split("/")[1])
+        self.assertTrue(all(r["cross_device"] for r in out))
+        self.assertEqual(out[0]["device_count"], 2)
 
     def test_same_device_not_flagged(self):
-        rows = [entry("/d1/a", sha256="h"), entry("/d1/b", sha256="h")]
+        rows = [entry("/d1/a", sha256="h", size=1), entry("/d1/b", sha256="h", size=1)]
         groups = duplicates.find_duplicates(rows, device_of=lambda p: p.split("/")[1])
-        self.assertFalse(_cross_device(groups[0]))
+        out = duplicates.to_rows(groups, device_of=lambda p: p.split("/")[1])
+        self.assertFalse(any(r["cross_device"] for r in out))
+        self.assertEqual(out[0]["device_count"], 1)
 
-
-def _cross_device(group):
-    return len({r.path.split("/")[1] for r in group}) > 1
+    def test_without_device_mapping_parent_is_used_as_proxy(self):
+        rows = [
+            entry("/d1/a", sha256="h", size=1, parent="/d1"),
+            entry("/d2/b", sha256="h", size=1, parent="/d2"),
+        ]
+        groups = duplicates.find_duplicates(rows)
+        out = duplicates.to_rows(groups)
+        self.assertTrue(out[0]["cross_device"])
 
 
 class TestToRows(unittest.TestCase):

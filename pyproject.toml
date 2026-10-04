@@ -68,3 +68,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "drivev3.py" = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PTH"]
 "tests/*" = ["PTH"]
+# devices.py works on MSYS2 POSIX paths ("/dev/disk/by-id") as plain strings.
+# pathlib.Path would apply Windows semantics to them, which is exactly the
+# behaviour this module exists to avoid, so the os.path helpers are correct.
+"src/msys2_tree_size/devices.py" = ["PTH"]

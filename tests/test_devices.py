@@ -43,15 +43,11 @@ class TestParseByID(unittest.TestCase):
 
     def test_extracts_id_and_device_name(self):
         rows = {r["id"]: r for r in devices.parse_by_id(LS_BY_ID)}
-        self.assertEqual(
-            rows["nvme-Samsung_SSD_970_EVO_1TB_S1234-part1"]["name"], "nvme0n1p1"
-        )
+        self.assertEqual(rows["nvme-Samsung_SSD_970_EVO_1TB_S1234-part1"]["name"], "nvme0n1p1")
 
     def test_actual_column_preserves_relative_target(self):
         rows = {r["id"]: r for r in devices.parse_by_id(LS_BY_ID)}
-        self.assertEqual(
-            rows["ata-WDC_WD40EZRZ-00GXCB0_WD-WCC7K1234567"]["actual"], "../../sda"
-        )
+        self.assertEqual(rows["ata-WDC_WD40EZRZ-00GXCB0_WD-WCC7K1234567"]["actual"], "../../sda")
 
     def test_total_line_is_skipped(self):
         rows = devices.parse_by_id(LS_BY_ID)
@@ -77,7 +73,8 @@ class TestParsePartitions(unittest.TestCase):
     def test_major_minor_are_ints(self):
         rows = {r["name"]: r for r in devices.parse_partitions(PROC_PARTITIONS)}
         self.assertEqual(rows["sda"]["major"], 8)
-        self.assertEqual(rows["sda"]["minor"], 1)
+        self.assertEqual(rows["sda"]["minor"], 0)
+        self.assertEqual(rows["sda1"]["minor"], 1)
 
     def test_header_line_is_not_a_row(self):
         rows = devices.parse_partitions(PROC_PARTITIONS)
@@ -103,9 +100,7 @@ class TestBuildTable(unittest.TestCase):
         self.assertEqual(blocks, sorted(blocks))
 
     def test_by_id_without_partition_entry_is_dropped(self):
-        ls = LS_BY_ID + (
-            "lrwxrwxrwx 1 root root 9 Feb  1 10:00 usb-Ghost -> ../../sdz\n"
-        )
+        ls = LS_BY_ID + ("lrwxrwxrwx 1 root root 9 Feb  1 10:00 usb-Ghost -> ../../sdz\n")
         table = devices.build_table(ls, PROC_PARTITIONS)
         self.assertNotIn("usb-Ghost", [row["id"] for row in table])
 
@@ -117,14 +112,10 @@ class TestBuildTable(unittest.TestCase):
     def test_row_carries_id_name_and_blocks(self):
         table = devices.build_table(LS_BY_ID, PROC_PARTITIONS)
         smallest = table[0]
-        self.assertEqual(
-            set(smallest) >= {"id", "name", "blocks", "major", "minor"}, True
-        )
+        self.assertEqual(set(smallest) >= {"id", "name", "blocks", "major", "minor"}, True)
 
     def test_duplicate_ids_are_removed(self):
-        ls = LS_BY_ID + (
-            "lrwxrwxrwx 1 root root  9 Feb  1 10:00 dup-alias -> ../../nvme0n1\n"
-        )
+        ls = LS_BY_ID + ("lrwxrwxrwx 1 root root  9 Feb  1 10:00 dup-alias -> ../../nvme0n1\n")
         table = devices.build_table(ls, PROC_PARTITIONS)
         names = [row["name"] for row in table]
         self.assertEqual(len(names), len(set(names)))
