@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "msys2-tree-size"
+version = "0.1.0"
+description = "A CLI re-implementation of TreeSize for MSYS2: recursive disk usage, hashing and duplicate detection"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "fufurobot" }]
+keywords = ["msys2", "du", "disk-usage", "treesize", "duplicates", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Filesystems",
+]
+dependencies = []
+
+[project.optional-dependencies]
+tables = ["pandas>=2.0"]
+progress = ["tqdm>=4.60"]
+dev = [
+    "pandas>=2.0",
+    "tqdm>=4.60",
+    "pytest>=7.0",
+]
+
+[project.scripts]
+msys2-tree-size = "msys2_tree_size.cli:main"
+mts = "msys2_tree_size.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fufurobot/msys2-tree-size"
+Issues = "https://github.com/fufurobot/msys2-tree-size/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/msys2_tree_size"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["src/msys2_tree_size"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PTH"]
+ignore = [
+    # zip() without strict= is fine; strict= is 3.10+ and we support 3.9
+    "B905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"drivev3.py" = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PTH"]
+"tests/*" = ["PTH"]
