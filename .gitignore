@@ -223,6 +223,7 @@ __marimo__/
 .uv-cache/
 .uv-python/
 .uv-python-cache/
+.uv-tools/
 .venv/
 
 # scratch space for tests (see tests/support.py)
