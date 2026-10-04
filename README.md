@@ -19,16 +19,27 @@ MSYS2 exposes POSIX semantics that plain Win32 Python does not:
 | Feature | Why it matters here |
 | --- | --- |
 | `/dev/disk/by-id/*` | Stable, hardware-derived device names instead of `C:`/`D:` |
-| `/proc/partitions` | Partitions in KiB, including ones without a drive letter |
-| Byte-exact filenames | POSIX names are arbitrary bytes, not UTF-16 |
+| `/proc/partitions` | Partitions in KiB, including ones with no drive letter, plus the `win-mounts` column |
+| POSIX filenames | Names are arbitrary bytes, not UTF-16 |
 
-That last point is the sharp edge. Python decodes undecodable bytes into *lone
-surrogates* (`U+DC80`–`U+DCFF`) via the `surrogateescape` handler. Anything that
-re-encodes such a string to UTF-8 — JSON, CSV, and notably `pyarrow`-backed
-pandas string dtypes — raises `UnicodeEncodeError`. This project therefore keeps
-paths as `str` only where Python requires it, and always round-trips them through
-`utf-8` + `surrogateescape` on the way to disk. See
-[`docs/design.md`](docs/design.md).
+### Two traps worth knowing about
+
+**MSYS2's Python is a native Windows build.** `sys.platform` is `"win32"`, not
+`"msys"`, and such an interpreter cannot open `/c/Users`, `/dev/disk/by-id` or
+`/proc/partitions` at all — those are *virtual* paths that the MSYS2 runtime
+resolves only for MSYS2 binaries. This tool therefore detects the MSYS2
+installation by probing for it and reaches the virtual paths through
+`msys2_shell.cmd`. It does **not** hardcode `C:\msys64`: portable and per-user
+installs are common, and a hardcoded path would silently disable device
+reporting for everyone whose install lives elsewhere.
+
+**POSIX filenames are arbitrary bytes, not text.** Python decodes undecodable
+bytes into *lone surrogates* (`U+DC80`–`U+DCFF`) via the `surrogateescape`
+handler. Anything that re-encodes such a string to UTF-8 — JSON, CSV, and
+notably `pyarrow`-backed pandas string dtypes — raises `UnicodeEncodeError`.
+This project keeps paths byte-exact through `paths.py`. See
+[`docs/design.md`](docs/design.md) for the mechanism and the measurements behind
+both points.
 
 ## Install
 
@@ -79,16 +90,21 @@ drivev3.py         the original prototype this package was extracted from
 ## Development
 
 ```bash
-# tests
-uv run --with pandas --with tqdm python -m unittest discover -s tests -v
+# tests (run from the repository root)
+uv run python -m unittest discover -s tests -t . -v
 
-# lint
+# lint and format
 uvx ruff check src tests
+uvx ruff format --check src tests
 ```
 
-CI runs the suite on `ubuntu-latest` **and** inside real MSYS2
-(`UCRT64`, `CLANG64`, `MINGW64`), because the POSIX path behaviour cannot be
-faithfully emulated on Linux.
+Test scratch space lives under `.tmp/` inside the checkout and is git-ignored, so
+a run leaves the working tree clean.
+
+CI runs the suite on `ubuntu-latest` **and** inside real MSYS2 (`UCRT64`,
+`CLANG64`, `MINGW64`), because the POSIX path behaviour cannot be faithfully
+emulated on Linux. The MSYS2 jobs print `sys.platform` and `uname` first, then
+run the CLI against the runner's real device tree.
 
 ## License
 

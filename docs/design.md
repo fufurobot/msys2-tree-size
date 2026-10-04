@@ -90,11 +90,80 @@ Under MSYS2, `/c/Users` and `C:\Users` name the same directory. Input paths are
 normalised through `paths.to_posix()` so that a Windows-style argument typed at a
 `cmd.exe` prompt still works, but the canonical form in all output is POSIX.
 
+## What running on real MSYS2 actually revealed
+
+Every claim in this section was wrong the first time. The corrections came from
+running against a real MSYS2 CLANG64 installation, not from reasoning about it.
+
+### `sys.platform` is `win32`, not `msys`
+
+MSYS2 ships a **native Windows** Python build. `sys.platform` is `"win32"`, and
+such an interpreter cannot open `/c/Users`, `/dev/disk/by-id` or
+`/proc/partitions` **at all** — those paths are virtual, and the MSYS2 runtime
+resolves them only for MSYS2 *binaries*, never for an arbitrary Win32 process.
+
+So `paths.is_msys2()` means "the interpreter itself resolves POSIX paths" (true
+only for a genuine Cygwin/MSYS runtime Python), MSYS2 discovery lives in
+`paths.msys2_root()` and probes the filesystem rather than trusting
+`sys.platform`, and device reporting from a Win32 interpreter necessarily goes
+through a subprocess.
+
+### Do not hardcode `C:\msys64`
+
+MSYS2 is routinely installed elsewhere: a portable extract, a per-user
+directory, a package-manager prefix. The machine this was developed on has it
+under `Downloads`. A hardcoded path silently disables device reporting for
+everyone else, so `msys2_root()` searches, in order: `MSYS2_ROOT`/`MSYS2_DIR`,
+the conventional prefixes, anything already on `PATH` (a `bash`/`ls`/`cat`
+reveals its installation root), then a depth-bounded scan.
+
+### `/proc/partitions` has a fifth column
+
+On MSYS2 it reads:
+
+```
+major minor  #blocks  name   win-mounts
+
+    8     3 234095616 sda3   C:\
+```
+
+`win-mounts` holds the Windows drive letter. A strict four-column parser matches
+**nothing** there, so the tool reported an empty device table on a machine with
+ten disks. The first four columns are now read positionally and the remainder
+kept as `win-mounts`, so Linux output still yields identical keys.
+
+### MSYS2 `usr/bin` tools cannot be exec'd directly
+
+`usr/bin/ls.exe` and `cat.exe` abort when started by a Win32 process:
+
+```
+NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-...): 0xC0000022
+```
+
+They are POSIX binaries and need the MSYS2 runtime to create their shared-memory
+section. Reaching the virtual paths therefore goes through `msys2_shell.cmd`,
+invoked via `cmd.exe` because it is a batch file. Where a host forbids even that
+— some sandboxes constrain child processes — the reader returns empty and the
+command reports a note rather than raising or quietly lying.
+
 ## Testing strategy
 
 - **Unit tests** (`tests/`) never touch the real filesystem for logic: they use
   `FakeFS`, an in-memory tree injected into the traversal.
-- **Integration tests** use `tempfile.TemporaryDirectory` and are skipped on
-  platforms where the POSIX behaviour under test does not exist.
-- **MSYS2-only tests** are guarded by `sys.platform == "msys"` and additionally
-  skipped in CI when `/dev/disk/by-id` is absent on the runner.
+- **Fixtures are verbatim captures.** `PROC_PARTITIONS_MSYS2` and
+  `LS_BY_ID_MSYS2` in `tests/test_devices.py` reproduce the real `win-mounts`
+  column and long NVMe by-id names. A fixture test is what catches a format
+  assumption like the four-column bug.
+- **Integration tests** use a scratch directory inside the checkout and skip on
+  the specific capability they need, so they run on MSYS2 and skip honestly
+  elsewhere.
+- **MSYS2-only guards are narrow.** `paths.is_msys2()` is deliberately stricter
+  than "MSYS2 is installed"; the device tests guard on
+  `msys2_root() is not None` instead, because device reading works from a Win32
+  interpreter through the launcher.
+
+Scratch directories use **fixed** paths under `.tmp/` rather than `mkdtemp`.
+Cleanup failures must not be reported as test failures, and a write grant is
+often provisioned per fixed path, so a dynamically named directory can be
+readable but not writable.
+
