@@ -233,3 +233,6 @@ __marimo__/
 *.parquet
 *.pkl
 !tests/data/*.csv
+
+# stray probe output
+out.txt
