@@ -11,15 +11,15 @@ Two levels of testing:
 from __future__ import annotations
 
 import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from msys2_tree_size import walk  # noqa: E402
+# ``msys2_tree_size.walk`` is both a submodule and a function re-exported at
+# package level, so the submodule is imported explicitly here.  The tests are
+# written against the module's own API.
+import msys2_tree_size.walk as walk  # noqa: E402
+from msys2_tree_size import paths  # noqa: E402
 from msys2_tree_size.walk import Entry, FakeFS  # noqa: E402
+from support import TempDirTestCase
 
 
 def _entries(root):
@@ -43,7 +43,7 @@ class TestWalkFakeFS(unittest.TestCase):
     def test_nested_sizes_bubble_up(self):
         fs = FakeFS({"/r": {"sub": {"deep": {"f": b"x" * 10}}, "top": b"y" * 5}})
         got = _by_path(fs)
-        self.assertEqual(got["/r/deep/f"].size, 10)
+        self.assertEqual(got["/r/sub/deep/f"].size, 10)
         self.assertEqual(got["/r/sub/deep"].size, 10)
         self.assertEqual(got["/r/sub"].size, 10)
         self.assertEqual(got["/r"].size, 15)
@@ -191,11 +191,19 @@ class TestWalkErrors(unittest.TestCase):
         self.assertEqual(seen, ["/r/locked"])
 
 
-class TestWalkRealFS(unittest.TestCase):
+class TestWalkRealFS(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-        self.addCleanup(self._tmp.cleanup)
+        self.root = self.make_temp_dir()
+
+    def key(self, path) -> str:
+        """Canonical lookup key.
+
+        ``walk`` reports paths in POSIX form, because that is the canonical
+        form under MSYS2 where ``/c/...`` and ``C:\\...`` name the same
+        directory.  Tests therefore look results up through the same
+        normalisation instead of through ``str(Path)``.
+        """
+        return paths.to_posix(str(path))
 
     def test_matches_manual_totals(self):
         (self.root / "a.txt").write_bytes(b"a" * 10)
@@ -203,20 +211,20 @@ class TestWalkRealFS(unittest.TestCase):
         sub.mkdir()
         (sub / "b.bin").write_bytes(b"b" * 90)
         got = _by_path(self.root)
-        self.assertEqual(got[str(self.root)].size, 100)
-        self.assertEqual(got[str(sub)].size, 90)
-        self.assertEqual(got[str(self.root / "a.txt")].size, 10)
+        self.assertEqual(got[self.key(self.root)].size, 100)
+        self.assertEqual(got[self.key(sub)].size, 90)
+        self.assertEqual(got[self.key(self.root / "a.txt")].size, 10)
 
     def test_empty_directory_size_is_zero(self):
         (self.root / "empty").mkdir()
         got = _by_path(self.root)
-        self.assertEqual(got[str(self.root / "empty")].size, 0)
+        self.assertEqual(got[self.key(self.root / "empty")].size, 0)
 
     def test_hidden_files_are_included(self):
         (self.root / ".hidden").write_bytes(b"12345")
         got = _by_path(self.root)
-        self.assertIn(str(self.root / ".hidden"), got)
-        self.assertEqual(got[str(self.root)].size, 5)
+        self.assertIn(self.key(self.root / ".hidden"), got)
+        self.assertEqual(got[self.key(self.root)].size, 5)
 
     def test_real_symlink_is_not_followed_for_size(self):
         target = self.root / "target.bin"
@@ -228,8 +236,8 @@ class TestWalkRealFS(unittest.TestCase):
             self.skipTest("symlinks unavailable")
         got = _by_path(self.root)
         # The link must not double-count the target's bytes.
-        self.assertEqual(got[str(self.root)].size, 1000)
-        self.assertEqual(got[str(link)].type, "link")
+        self.assertEqual(got[self.key(self.root)].size, 1000)
+        self.assertEqual(got[self.key(link)].type, "link")
 
     def test_hashing_matches_file_contents(self):
         import hashlib
@@ -237,7 +245,8 @@ class TestWalkRealFS(unittest.TestCase):
         (self.root / "f").write_bytes(b"content")
         got = _by_path(self.root)
         self.assertEqual(
-            got[str(self.root / "f")].sha256, hashlib.sha256(b"content").hexdigest()
+            got[self.key(self.root / "f")].sha256,
+            hashlib.sha256(b"content").hexdigest(),
         )
 
     def test_max_depth_limits_emitted_entries_but_not_sizes(self):
@@ -245,9 +254,9 @@ class TestWalkRealFS(unittest.TestCase):
         deep.mkdir(parents=True)
         (deep / "f").write_bytes(b"x" * 42)
         got = _by_path_limited(self.root, max_depth=1)
-        self.assertIn(str(self.root / "a"), got)
-        self.assertNotIn(str(self.root / "a" / "b"), got)
-        self.assertEqual(got[str(self.root)].size, 42)
+        self.assertIn(self.key(self.root / "a"), got)
+        self.assertNotIn(self.key(self.root / "a" / "b"), got)
+        self.assertEqual(got[self.key(self.root)].size, 42)
 
 
 class TestEntryDataclass(unittest.TestCase):

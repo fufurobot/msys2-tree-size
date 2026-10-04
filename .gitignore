@@ -225,6 +225,9 @@ __marimo__/
 .uv-python-cache/
 .venv/
 
+# scratch space for tests (see tests/support.py)
+.tmp/
+
 # tool output
 *.csv
 *.parquet

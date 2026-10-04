@@ -3,28 +3,20 @@
 from __future__ import annotations
 
 import hashlib
-import sys
-import tempfile
 import unittest
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from msys2_tree_size import hashing  # noqa: E402
+from support import TempDirTestCase
 
 
-class TestHashFile(unittest.TestCase):
+class TestHashFile(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-        self.addCleanup(self._tmp.cleanup)
+        self.tmp = self.make_temp_dir()
 
     def test_matches_hashlib(self):
         p = self.tmp / "a.bin"
         p.write_bytes(b"hello world")
-        self.assertEqual(
-            hashing.hash_file(p), hashlib.sha256(b"hello world").hexdigest()
-        )
+        self.assertEqual(hashing.hash_file(p), hashlib.sha256(b"hello world").hexdigest())
 
     def test_empty_file(self):
         p = self.tmp / "empty"
@@ -73,9 +65,7 @@ class TestMerkleHash(unittest.TestCase):
 
     def test_changing_a_child_hash_changes_result(self):
         a = ("a.txt", "1" * 64)
-        self.assertNotEqual(
-            hashing.merkle_hash([a]), hashing.merkle_hash([("a.txt", "9" * 64)])
-        )
+        self.assertNotEqual(hashing.merkle_hash([a]), hashing.merkle_hash([("a.txt", "9" * 64)]))
 
     def test_changing_a_child_name_changes_result(self):
         self.assertNotEqual(

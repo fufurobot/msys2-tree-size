@@ -105,9 +105,7 @@ class TestExtensionTotals(unittest.TestCase):
             {"type": "file", "name": "b.TXT", "size": 5},
             {"type": "file", "name": "c.bin", "size": 1},
         ]
-        self.assertEqual(
-            sizes.extension_totals(rows), {".txt": 15, ".bin": 1}
-        )
+        self.assertEqual(sizes.extension_totals(rows), {".txt": 15, ".bin": 1})
 
     def test_directories_are_ignored(self):
         rows = [{"type": "dir", "name": "d.txt", "size": 999}]

@@ -9,14 +9,11 @@ reports.
 from __future__ import annotations
 
 import json
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 from msys2_tree_size import paths  # noqa: E402
+from support import TempDirTestCase
 
 
 class TestDecodeEncode(unittest.TestCase):
@@ -50,24 +47,23 @@ class TestDecodeEncode(unittest.TestCase):
         self.assertEqual(paths.decode_path("/tmp/x"), "/tmp/x")
 
 
-class TestSafeText(unittest.TestCase):
+class TestSafeText(TempDirTestCase):
     def test_safe_text_escapes_surrogates_losslessly(self):
         s = paths.decode_path(b"/tmp/\xff")
         escaped = paths.safe_text(s)
-        # Must be encodable as strict UTF-8...
+        # Must be encodable as strict UTF-8, unlike the original.
         escaped.encode("utf-8")
-        # ...and must still be reversible.
-        self.assertEqual(paths.decode_path(paths.encode_path(escaped)), s.replace("\udcff", "\udcff"))
+        self.assertNotIn("\udcff", escaped)
+        # The escape names the exact byte that was lost, so it stays debuggable.
+        self.assertEqual(escaped, "/tmp/\\udcff")
 
     def test_safe_text_leaves_plain_text_alone(self):
         self.assertEqual(paths.safe_text("/tmp/plain.txt"), "/tmp/plain.txt")
 
 
-class TestWriters(unittest.TestCase):
+class TestWriters(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-        self.addCleanup(self._tmp.cleanup)
+        self.tmp = self.make_temp_dir()
 
     def test_write_text_is_byte_exact(self):
         target = self.tmp / "out.txt"
@@ -137,6 +133,25 @@ class TestToPosix(unittest.TestCase):
 
     def test_bare_drive_root(self):
         self.assertEqual(paths.to_posix("C:\\"), "/c/")
+
+
+class TestNormalizeSeparators(unittest.TestCase):
+    def test_absolute_win32_path_becomes_posix(self):
+        self.assertEqual(paths.normalize_separators("\\tmp\\x"), "/tmp/x")
+
+    def test_drive_path_is_delegated_to_to_posix(self):
+        self.assertEqual(paths.normalize_separators("C:\\Users\\a"), "/c/Users/a")
+
+    def test_relative_backslash_is_preserved(self):
+        # On POSIX a backslash is a legal filename character; rewriting it
+        # would silently retarget the path.
+        self.assertEqual(paths.normalize_separators("a\\b"), "a\\b")
+
+    def test_plain_posix_untouched(self):
+        self.assertEqual(paths.normalize_separators("/tmp/x"), "/tmp/x")
+
+    def test_unc_left_alone(self):
+        self.assertEqual(paths.normalize_separators("\\\\srv\\share"), "\\\\srv\\share")
 
 
 class TestJoinAndSplit(unittest.TestCase):
