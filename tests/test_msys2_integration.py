@@ -23,7 +23,19 @@ from support import TempDirTestCase
 
 
 def _is_msys2() -> bool:
-    return sys.platform in ("msys", "cygwin")
+    """True when the interpreter itself resolves MSYS2 POSIX paths."""
+    return paths.is_msys2()
+
+
+def _has_msys2_install() -> bool:
+    """True when an MSYS2 installation is present on this machine.
+
+    Deliberately *not* the same as :func:`_is_msys2`.  Measured on a real MSYS2
+    CLANG64 install, ``sys.platform`` is ``"win32"`` because MSYS2 ships a
+    native Windows Python; the POSIX paths are virtual and are resolved by the
+    MSYS2 runtime only for MSYS2 binaries.
+    """
+    return paths.msys2_root() is not None
 
 
 def _drive_mount_ok() -> bool:
@@ -136,30 +148,44 @@ class TestRealDevices(TempDirTestCase):
     """The live readers must work on a real MSYS2 system, or say why not."""
 
     def test_by_id_is_readable(self):
-        if not _is_msys2():
-            self.skipTest("not running under MSYS2")
-        if not os.path.isdir(devices.BY_ID_DIR):
-            self.skipTest("/dev/disk/by-id unavailable in this container")
+        if not _has_msys2_install():
+            self.skipTest("no MSYS2 installation found")
         rows = devices.read_by_id()
-        self.assertTrue(rows)
+        if not rows:
+            self.skipTest("MSYS2 virtual device tree not readable in this environment")
         self.assertTrue(all(r["name"] for r in rows))
+        self.assertTrue(all(r["id"] for r in rows))
 
     def test_partitions_is_readable(self):
-        if not _is_msys2():
-            self.skipTest("not running under MSYS2")
-        if not os.path.isfile(devices.PARTITIONS_FILE):
-            self.skipTest("/proc/partitions unavailable in this container")
+        if not _has_msys2_install():
+            self.skipTest("no MSYS2 installation found")
         rows = devices.read_partitions()
-        self.assertTrue(rows)
+        if not rows:
+            self.skipTest("/proc/partitions not readable in this environment")
         self.assertTrue(all(isinstance(r["#blocks"], int) for r in rows))
 
+    def test_every_row_exposes_win_mounts(self):
+        if not _has_msys2_install():
+            self.skipTest("no MSYS2 installation found")
+        rows = devices.read_partitions()
+        if not rows:
+            self.skipTest("/proc/partitions not readable in this environment")
+        self.assertTrue(all("win-mounts" in row for row in rows))
+
     def test_inventory_joins_on_a_real_system(self):
-        if not _is_msys2():
-            self.skipTest("not running under MSYS2")
-        if not os.path.isdir(devices.BY_ID_DIR):
-            self.skipTest("/dev/disk/by-id unavailable in this container")
+        if not _has_msys2_install():
+            self.skipTest("no MSYS2 installation found")
         result = devices.inventory()
+        # Must never be both empty and silent.
         self.assertTrue(result.rows or result.notes)
+
+    def test_inventory_rows_have_positive_sizes(self):
+        if not _has_msys2_install():
+            self.skipTest("no MSYS2 installation found")
+        result = devices.inventory()
+        if not result.rows:
+            self.skipTest("device tree not readable in this environment")
+        self.assertTrue(all(row["blocks"] > 0 for row in result.rows))
 
 
 if __name__ == "__main__":

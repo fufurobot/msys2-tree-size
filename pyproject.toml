@@ -72,3 +72,7 @@ ignore = [
 # pathlib.Path would apply Windows semantics to them, which is exactly the
 # behaviour this module exists to avoid, so the os.path helpers are correct.
 "src/msys2_tree_size/devices.py" = ["PTH"]
+# paths.py is the byte-exact path layer: it deliberately uses os.path/os.stat
+# on str and bytes so names containing lone surrogates are never pushed back
+# through pathlib's filesystem codec.
+"src/msys2_tree_size/paths.py" = ["PTH"]

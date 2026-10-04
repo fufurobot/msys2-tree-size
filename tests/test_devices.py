@@ -10,7 +10,10 @@ line has a variable number of columns, and ``/proc/partitions`` has a header.
 
 from __future__ import annotations
 
+import os
+import sys
 import unittest
+from pathlib import Path
 
 from msys2_tree_size import devices  # noqa: E402
 
@@ -33,6 +36,33 @@ major minor  #blocks  name
    8        0 3907018584 sda
    8        1 3907017216 sda1
    8       16   30031872 sdb
+"""
+
+# Real MSYS2 output carries a FIFTH column, `win-mounts`, holding the drive
+# letter.  A strict four-column parser silently discards every row, so this
+# captured fixture is the important one.
+PROC_PARTITIONS_MSYS2 = """\
+major minor  #blocks  name   win-mounts
+
+    8     0 250059096 sda
+    8     1    102400 sda1
+    8     2    131072 sda2
+    8     3 234095616 sda3   C:\\
+    8     4  15728640 sda4
+    8    16 124999680 sdb
+    8    17 124997632 sdb1   F:\\
+    8    32 482623488 sdc
+    8    33 482589696 sdc1   D:\\
+    8    34     32768 sdc2   E:\\
+"""
+
+# Real MSYS2 by-id output: the link names are long and the targets are bare
+# `../../sda`, with no `/dev/` prefix to strip.
+LS_BY_ID_MSYS2 = """\
+total 0
+lrwxrwxrwx 1 fufu fufu 0 Oct  4 11:12 nvme-Great_Wall_GW3300_256GB_0000. -> ../../sda
+lrwxrwxrwx 1 fufu fufu 0 Oct  4 11:12 nvme-Great_Wall_GW3300_256GB_0000.-part1 -> ../../sda1
+lrwxrwxrwx 1 fufu fufu 0 Oct  4 11:12 nvme-Great_Wall_GW3300_256GB_0000.-part3 -> ../../sda3
 """
 
 
@@ -119,6 +149,129 @@ class TestBuildTable(unittest.TestCase):
         table = devices.build_table(ls, PROC_PARTITIONS)
         names = [row["name"] for row in table]
         self.assertEqual(len(names), len(set(names)))
+
+
+class TestMsys2Partitions(unittest.TestCase):
+    """Real MSYS2 /proc/partitions has an extra `win-mounts` column."""
+
+    def test_every_row_survives_the_extra_column(self):
+        rows = devices.parse_partitions(PROC_PARTITIONS_MSYS2)
+        self.assertEqual(len(rows), 10)
+
+    def test_blocks_are_still_read_correctly(self):
+        rows = {r["name"]: r for r in devices.parse_partitions(PROC_PARTITIONS_MSYS2)}
+        self.assertEqual(rows["sda3"]["#blocks"], 234095616)
+
+    def test_win_mounts_is_captured_when_present(self):
+        rows = {r["name"]: r for r in devices.parse_partitions(PROC_PARTITIONS_MSYS2)}
+        self.assertEqual(rows["sda3"]["win-mounts"], "C:\\")
+
+    def test_win_mounts_absent_is_empty(self):
+        rows = {r["name"]: r for r in devices.parse_partitions(PROC_PARTITIONS_MSYS2)}
+        self.assertEqual(rows["sda"]["win-mounts"], "")
+
+    def test_classic_four_column_output_still_works(self):
+        rows = {r["name"]: r for r in devices.parse_partitions(PROC_PARTITIONS)}
+        self.assertEqual(rows["sda"]["#blocks"], 3907018584)
+        self.assertEqual(rows["sda"]["win-mounts"], "")
+
+    def test_header_is_still_rejected(self):
+        rows = devices.parse_partitions(PROC_PARTITIONS_MSYS2)
+        self.assertNotIn("name", [r["name"] for r in rows])
+
+    def test_extra_columns_are_ignored_not_fatal(self):
+        text = "major minor  #blocks  name   win-mounts  extra\n  8 0 100 sda C:\\ junk\n"
+        rows = devices.parse_partitions(text)
+        self.assertEqual(rows[0]["name"], "sda")
+        self.assertEqual(rows[0]["#blocks"], 100)
+
+
+class TestMsys2ByID(unittest.TestCase):
+    def test_long_real_world_names_parse(self):
+        rows = devices.parse_by_id(LS_BY_ID_MSYS2)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["name"], "sda")
+        self.assertEqual(rows[1]["name"], "sda1")
+
+    def test_join_with_msys2_partitions_yields_a_table(self):
+        table = devices.build_table(LS_BY_ID_MSYS2, PROC_PARTITIONS_MSYS2)
+        self.assertEqual(len(table), 3)
+        self.assertEqual([row["name"] for row in table], ["sda1", "sda3", "sda"])
+
+    def test_win_mounts_survives_the_join(self):
+        table = {
+            row["name"]: row for row in devices.build_table(LS_BY_ID_MSYS2, PROC_PARTITIONS_MSYS2)
+        }
+        self.assertEqual(table["sda3"]["win-mounts"], "C:\\")
+
+
+class TestMsys2Detection(unittest.TestCase):
+    """MSYS2 discovery must not hardcode one installation path."""
+
+    def test_msys2_root_is_none_or_an_existing_directory(self):
+        from msys2_tree_size import paths
+
+        root = paths.msys2_root()
+        if root is not None:
+            self.assertTrue(os.path.isdir(root), root)
+
+    def test_looks_like_msys2_rejects_empty_and_missing(self):
+        from msys2_tree_size import paths
+
+        self.assertFalse(paths._looks_like_msys2(""))
+        self.assertFalse(paths._looks_like_msys2(str(Path(__file__).parent)))
+
+    def test_msys2_shell_is_none_or_a_cmd_file(self):
+        shell = devices.msys2_shell()
+        if shell is not None:
+            self.assertTrue(shell.lower().endswith(".cmd"), shell)
+            self.assertTrue(os.path.isfile(shell), shell)
+
+    def test_is_msys2_matches_platform(self):
+        from msys2_tree_size import paths
+
+        self.assertEqual(paths.is_msys2(), sys.platform in ("msys", "cygwin"))
+
+    def test_diagnose_returns_explanatory_lines(self):
+        lines = devices.diagnose()
+        self.assertTrue(lines)
+        self.assertTrue(any("MSYS2 root" in line for line in lines))
+
+
+class TestLiveHardwareShape(unittest.TestCase):
+    """Parsing must cope with the exact shapes real MSYS2 hardware produces.
+
+    Captured from a machine whose /proc/partitions carries the win-mounts
+    column and whose by-id names are long NVMe identifiers.
+    """
+
+    def test_captured_msys2_output_joins_completely(self):
+        table = devices.build_table(LS_BY_ID_MSYS2, PROC_PARTITIONS_MSYS2)
+        by_name = {row["name"]: row for row in table}
+        # sda3 is the only by-id entry with a windows mount in the fixture.
+        self.assertEqual(by_name["sda3"]["win-mounts"], "C:\\")
+        self.assertEqual(by_name["sda3"]["blocks"], 234095616)
+        self.assertEqual(by_name["sda3"]["id"].startswith("nvme-"), True)
+
+    def test_smallest_device_is_first(self):
+        table = devices.build_table(LS_BY_ID_MSYS2, PROC_PARTITIONS_MSYS2)
+        self.assertEqual([row["name"] for row in table], ["sda1", "sda3", "sda"])
+
+
+class TestInventoryNotes(unittest.TestCase):
+    def test_inventory_is_never_empty_and_silent(self):
+        result = devices.inventory()
+        self.assertTrue(result.rows or result.notes)
+
+    def test_absent_by_id_reports_a_note(self):
+        result = devices.inventory(by_id_dir="/nonexistent/by-id")
+        self.assertEqual(result.rows, [])
+        self.assertTrue(result.notes)
+
+    def test_absent_partitions_reports_a_note(self):
+        result = devices.inventory(partitions_file="/nonexistent/partitions")
+        self.assertEqual(result.rows, [])
+        self.assertTrue(result.notes)
 
 
 class TestReadByIDLive(unittest.TestCase):
