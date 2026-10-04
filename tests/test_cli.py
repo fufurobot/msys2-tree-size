@@ -12,9 +12,8 @@ import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from support import TempDirTestCase
-
 from msys2_tree_size import cli  # noqa: E402
+from support import TempDirTestCase
 
 
 class CliTestCase(TempDirTestCase):
@@ -67,9 +66,7 @@ class TestParser(CliTestCase):
 
     def test_subcommands_are_registered(self):
         parser = cli.build_parser()
-        actions = [
-            a for a in parser._actions if isinstance(a, cli.argparse._SubParsersAction)
-        ]
+        actions = [a for a in parser._actions if isinstance(a, cli.argparse._SubParsersAction)]
         self.assertTrue(actions)
         self.assertEqual(set(actions[0].choices), {"du", "dupes", "devices"})
 
