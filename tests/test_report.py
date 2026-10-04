@@ -9,10 +9,9 @@ from __future__ import annotations
 import json
 import unittest
 
-from support import TempDirTestCase
-
 from msys2_tree_size import report  # noqa: E402
 from msys2_tree_size.walk import Entry  # noqa: E402
+from support import TempDirTestCase
 
 
 def entry(path, size=0, type="dir", depth=0, human=None, **kw):
@@ -33,9 +32,9 @@ def entry(path, size=0, type="dir", depth=0, human=None, **kw):
 
 
 SAMPLE = [
-    entry("/r/big.bin", size=1000, type="file", depth=1),
-    entry("/r/small.txt", size=24, type="file", depth=1),
-    entry("/r/sub", size=500, depth=1, child_count=1),
+    entry("/r/big.bin", size=1000, type="file", depth=1, parent="/r"),
+    entry("/r/small.txt", size=24, type="file", depth=1, parent="/r"),
+    entry("/r/sub", size=500, depth=1, parent="/r", child_count=1),
     entry("/r", size=1524, depth=0, child_count=3),
 ]
 
@@ -76,16 +75,63 @@ class TestFlat(unittest.TestCase):
 
 
 class TestTree(unittest.TestCase):
-    def test_indentation_follows_depth(self):
+    """Tree layout assertions measure the *glyph prefix*, not raw padding.
+
+    Labels start with a right-aligned size column, so counting leading spaces
+    would measure the size field instead of the nesting depth.
+    """
+
+    @staticmethod
+    def prefix_of(line: str) -> str:
+        """The connector prefix of *line*.
+
+        A label is ``<padded size>  <name>``, and nested lines insert the
+        connector glyphs *before* the size column.  So the prefix is everything
+        up to and including the connector, which is found by locating the first
+        size token (digits + unit) and taking what precedes it.
+        """
+        import re
+
+        match = re.search(r"\d+(?:\.\d+)?[BKMGTPE]\b", line)
+        if match is None:
+            return ""
+        return line[: match.start()].rstrip(" ")
+
+    def test_root_has_no_connector(self):
         text = report.render_tree(SAMPLE)
         lines = [line for line in text.splitlines() if line.strip()]
-        root = next(line for line in lines if "/r" in line and "sub" not in line)
-        child = next(line for line in lines if "big.bin" in line)
-        self.assertLess(len(root) - len(root.lstrip()), len(child) - len(child.lstrip()))
+        self.assertEqual(self.prefix_of(lines[0]), "")
+
+    def test_children_are_nested_under_the_root(self):
+        text = report.render_tree(SAMPLE)
+        child = next(line for line in text.splitlines() if "big.bin" in line)
+        self.assertNotEqual(self.prefix_of(child), "")
+
+    def test_indentation_grows_with_depth(self):
+        rows = SAMPLE + [entry("/r/sub/deep", size=10, type="file", depth=2, parent="/r/sub")]
+        text = report.render_tree(rows)
+        depth1 = next(line for line in text.splitlines() if "sub" in line)
+        depth2 = next(line for line in text.splitlines() if "deep" in line)
+        self.assertLess(len(self.prefix_of(depth1)), len(self.prefix_of(depth2)))
+
+    def test_last_child_uses_the_terminal_connector(self):
+        text = report.render_tree(SAMPLE)
+        lines = [line for line in text.splitlines() if line.strip()]
+        self.assertTrue(lines[-1].startswith("`-- "), lines[-1])
+
+    def test_non_last_children_use_the_branch_connector(self):
+        text = report.render_tree(SAMPLE)
+        lines = [line for line in text.splitlines() if line.strip()]
+        self.assertTrue(lines[1].startswith("|-- "), lines[1])
 
     def test_children_precede_or_follow_consistently(self):
         text = report.render_tree(SAMPLE)
-        self.assertLess(text.index("/r/big.bin"), text.index("small.txt"))
+        self.assertLess(text.index("big.bin"), text.index("small.txt"))
+
+    def test_children_are_listed_largest_first(self):
+        text = report.render_tree(SAMPLE)
+        self.assertLess(text.index("big.bin"), text.index("sub"))
+        self.assertLess(text.index("sub"), text.index("small.txt"))
 
     def test_empty_input(self):
         self.assertEqual(report.render_tree([]).strip(), "")
@@ -96,7 +142,20 @@ class TestTree(unittest.TestCase):
 
     def test_unicode_option_uses_box_drawing(self):
         text = report.render_tree(SAMPLE, ascii_only=False)
-        self.assertTrue(any(ch in text for ch in "├└─"))
+        codepoints = {ord(ch) for ch in text}
+        self.assertTrue(
+            codepoints & {0x251C, 0x2514, 0x2500},
+            "expected box-drawing glyphs in the unicode tree",
+        )
+
+    def test_ascii_option_contains_no_non_ascii(self):
+        text = report.render_tree(SAMPLE, ascii_only=True)
+        self.assertTrue(all(ord(ch) < 128 for ch in text))
+
+    def test_files_can_be_hidden(self):
+        text = report.render_tree(SAMPLE, show_files=False)
+        self.assertNotIn("big.bin", text)
+        self.assertIn("sub", text)
 
 
 class TestJson(unittest.TestCase):
