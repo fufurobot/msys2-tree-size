@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "msys2-tree-size"
+version = "0.1.0"
+description = "A CLI re-implementation of TreeSize for MSYS2: recursive disk usage, hashing and duplicate detection"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "fufurobot" }]
+keywords = ["msys2", "du", "disk-usage", "treesize", "duplicates", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Filesystems",
+]
+dependencies = []
+
+[project.optional-dependencies]
+tables = ["pandas>=2.0"]
+progress = ["tqdm>=4.60"]
+dev = [
+    "pandas>=2.0",
+    "tqdm>=4.60",
+    "pytest>=7.0",
+]
+
+[project.scripts]
+msys2-tree-size = "msys2_tree_size.cli:main"
+mts = "msys2_tree_size.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fufurobot/msys2-tree-size"
+Issues = "https://github.com/fufurobot/msys2-tree-size/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/msys2_tree_size"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["src/msys2_tree_size"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PTH"]
+ignore = [
+    # zip() without strict= is fine; strict= is 3.10+ and we support 3.9
+    "B905",
+    # open() is deliberate: this package opens paths as *bytes* to keep
+    # POSIX filenames byte-exact.  Path.open() takes str and would force the
+    # name back through the filesystem codec, defeating the point.
+    "PTH123",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"drivev3.py" = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PTH"]
+"tests/*" = ["PTH"]
+# devices.py works on MSYS2 POSIX paths ("/dev/disk/by-id") as plain strings.
+# pathlib.Path would apply Windows semantics to them, which is exactly the
+# behaviour this module exists to avoid, so the os.path helpers are correct.
+"src/msys2_tree_size/devices.py" = ["PTH"]
+# paths.py is the byte-exact path layer: it deliberately uses os.path/os.stat
+# on str and bytes so names containing lone surrogates are never pushed back
+# through pathlib's filesystem codec.
+"src/msys2_tree_size/paths.py" = ["PTH"]
