@@ -83,12 +83,102 @@ class TestBundleIsBuiltFromADownload(unittest.TestCase):
                 f"release workflow references a local install path: {suspicious}",
             )
 
-    def test_installs_python_into_the_bundled_runtime(self):
-        self.assertIn("pacman", self.text)
-        self.assertRegex(self.text, r"python python-pip|python-pip python")
+    def test_installs_uv_from_the_msys2_repository(self):
+        # uv is the mechanism for obtaining a native Windows CPython. Taking it
+        # from MSYS2's own repository keeps the bundle self-contained and
+        # reproducible rather than depending on a separately installed tool.
+        self.assertRegex(self.text, r"pacman -S[^\n]*mingw-w64-clang-x86_64-uv")
 
-    def test_installs_the_project_itself(self):
-        self.assertRegex(self.text, r"pip install[^\n]*\.")
+    def test_does_not_install_msys2_python(self):
+        # MSYS2's python is PEP 668 externally-managed, and uv refuses it as
+        # `Unknown operating system: mingw_x86_64_ucrt_llvm`. Installing it
+        # would reintroduce the exact failure this approach exists to avoid.
+        installs = re.findall(r"pacman -S[^\n]*", self.text)
+        for line in installs:
+            self.assertNotRegex(
+                line,
+                r"\bpython\b",
+                f"release workflow installs MSYS2 python: {line.strip()}",
+            )
+
+    def test_uses_uv_to_provide_the_interpreter(self):
+        self.assertRegex(self.text, r"uv run --python")
+        self.assertRegex(self.text, r"uv tool install")
+
+    def test_installs_the_console_script_so_it_is_on_path(self):
+        self.assertRegex(self.text, r"uv tool install[^\n]*--force[^\n]*\.")
+
+    def test_keeps_uv_state_inside_the_bundle(self):
+        # Otherwise the shipped tree would reference the build user's profile
+        # and break for anyone else.
+        for variable in ("UV_PYTHON_INSTALL_DIR", "UV_TOOL_DIR"):
+            self.assertIn(variable, self.text)
+
+
+class TestPythonMatrix(unittest.TestCase):
+    """The bundle must cover every CPython newest uv supports.
+
+    The floor is the project's declared requires-python; the ceiling is the
+    newest stable release. Pinning the minors here makes adding or dropping an
+    interpreter a deliberate, reviewable change rather than an accident.
+    """
+
+    def setUp(self):
+        self.text = RELEASE.read_text(encoding="utf-8")
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        declared = re.search(r'requires-python\s*=\s*">=([\d.]+)"', pyproject)
+        self.assertIsNotNone(declared, "pyproject has no requires-python floor")
+        assert declared is not None
+        self.floor = declared.group(1)
+
+    def matrix_versions(self) -> list[str]:
+        found = re.search(r'PYTHON_MATRIX:\s*"([^"]+)"', self.text)
+        self.assertIsNotNone(found, "release workflow has no PYTHON_MATRIX")
+        assert found is not None
+        return found.group(1).split()
+
+    def minors(self) -> list[tuple[int, int]]:
+        return [tuple(int(p) for p in v.split(".")[:2]) for v in self.matrix_versions()]
+
+    def test_matrix_is_not_empty(self):
+        self.assertTrue(self.matrix_versions())
+
+    def test_matrix_is_in_ascending_order(self):
+        minors = self.minors()
+        self.assertEqual(minors, sorted(minors), "matrix is not sorted")
+
+    def test_matrix_starts_at_the_declared_floor(self):
+        floor = tuple(int(p) for p in self.floor.split(".")[:2])
+        self.assertEqual(
+            self.minors()[0],
+            floor,
+            f"matrix starts at {self.minors()[0]}, requires-python floor is {floor}",
+        )
+
+    def test_matrix_has_no_gaps(self):
+        minors = self.minors()
+        lowest, highest = minors[0], minors[-1]
+        expected = [(lowest[0], m) for m in range(lowest[1], highest[1] + 1)]
+        self.assertEqual(minors, expected, "matrix has a gap in covered minors")
+
+    def test_matrix_includes_the_default_interpreter(self):
+        default = re.search(r'DEFAULT_PYTHON:\s*"([^"]+)"', self.text)
+        self.assertIsNotNone(default, "release workflow has no DEFAULT_PYTHON")
+        assert default is not None
+        self.assertIn(default.group(1), self.matrix_versions())
+
+    def test_entries_are_minor_versions_not_exact_pins(self):
+        # "3.12" rather than "3.12.1": asking uv for a minor gets the newest
+        # patch release, which is what a bundle should ship.
+        for version in self.matrix_versions():
+            self.assertRegex(version, r"^\d+\.\d+$")
+
+    def test_matrix_does_not_exceed_what_uv_supports(self):
+        # A guard against inventing a version that does not exist yet. uv
+        # installs CPython up to and including 3.15 (currently a release
+        # candidate), so a stable-only matrix must top out at 3.14.
+        highest = self.minors()[-1]
+        self.assertLessEqual(highest, (3, 15), "matrix claims an unsupported CPython")
 
 
 class TestBundleIsVerifiedBeforeRelease(unittest.TestCase):
