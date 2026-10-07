@@ -33,6 +33,7 @@ Two safety properties matter and are tested:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import tarfile
@@ -121,12 +122,20 @@ def read(
     path: str | os.PathLike[str],
     *,
     on_error: ErrorCallback | None = None,
+    max_depth: int = 1,
+    _level: int = 1,
 ) -> Iterator[Member]:
     """Yield every member of the archive at *path*.
 
     Yields nothing for a file that is not an archive, for a missing file, or for
     a corrupt one; the reason is passed to *on_error* when supplied. A scan of a
     real disk meets all three routinely, so none of them is an exception.
+
+    :param max_depth: how many levels of *nested* archives to descend into.
+        ``1`` reads this archive only, which is the common case; ``2`` also
+        reads archives found among its members.  Bounded deliberately: nested
+        archives are a decompression-bomb vector, and a zip containing a zip
+        containing a zip is not worth unbounded work.
     """
     report = on_error or _noop
     target = paths.decode_path(path)
@@ -147,19 +156,131 @@ def read(
             # tarfile handles gzip/bzip2/xz natively but not zstd, so a zstd
             # tar is routed to an external tool instead of failing.
             if formats.compression_of(target) == "zstd":
-                yield from _read_zstd_tar(target, report)
+                leaves = _read_zstd_tar(target, report)
             else:
-                yield from _read_tar(target, report)
+                leaves = _read_tar(target, report)
         elif kind == "zip":
-            yield from _read_zip(target, report)
+            leaves = _read_zip(target, report)
         elif kind == "7z":
-            yield from _read_with_tool(target, ("7z", "bsdtar"), report)
+            leaves = _read_with_tool(target, ("7z", "bsdtar"), report)
         elif kind == "rar":
-            yield from _read_with_tool(target, ("unrar", "7z", "bsdtar"), report)
+            leaves = _read_with_tool(target, ("unrar", "7z", "bsdtar"), report)
         elif kind == "compressed":
-            yield from _read_single_compressed(target, report)
+            leaves = _read_single_compressed(target, report)
+        else:  # pragma: no cover - formats.detect only returns the above
+            return
+
+        for member in leaves:
+            yield member
+
+            if _level >= max_depth or member.type == DIR:
+                continue
+            if not formats.is_archive(member.name):
+                continue
+
+            # A nested archive's bytes live inside the outer one, so reading it
+            # means extracting that member to a temporary file first. The temp
+            # file is always removed, and the recursion is bounded by max_depth.
+            nested = _extract_member_to_temp(target, kind, member, report)
+            if nested is None:
+                continue
+            try:
+                for inner in read(
+                    nested,
+                    on_error=report,
+                    max_depth=max_depth,
+                    _level=_level + 1,
+                ):
+                    # The nested archive was read from a temporary file, so its
+                    # members carry the temp path. Rebasing them onto the logical
+                    # chain (outer.zip::inner.zip::deep.txt) keeps the report
+                    # truthful about where the data actually came from and hides
+                    # an implementation detail. Both sides are normalised, since
+                    # the member path is stored in display form.
+                    yield _rebase(inner, _to_posix(nested), member.path)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(nested)
     except Exception as exc:  # noqa: BLE001 - a scan must never die on one file
         report(f"{target}: {type(exc).__name__}: {exc}")
+
+
+def _rebase(member: Member, from_prefix: str, to_prefix: str) -> Member:
+    """Rewrite *member*'s paths so they hang off *to_prefix* instead of *from_prefix*."""
+    return Member(
+        name=member.name,
+        path=member.path.replace(from_prefix, to_prefix, 1),
+        size=member.size,
+        type=member.type,
+        error=member.error,
+    )
+
+
+def _extract_member_to_temp(
+    archive_path: str,
+    kind: str,
+    member: Member,
+    report: ErrorCallback,
+) -> str | None:
+    """Write one member of *archive_path* to a temporary file and return its path.
+
+    Needed only for nested archives, since their bytes are inside the outer
+    container and the format readers need a real file. The caller removes it.
+    """
+    import tempfile
+
+    try:
+        handle, temp_path = tempfile.mkstemp(prefix="mts-nested-", suffix=_suffix_of(member.name))
+    except OSError as exc:
+        report(f"{member.path}: {exc}")
+        return None
+    os.close(handle)
+
+    try:
+        if kind == "zip":
+            with zipfile.ZipFile(archive_path) as zf, open(temp_path, "wb") as out:
+                out.write(zf.read(member.name))
+        elif kind == "tar":
+            with tarfile.open(archive_path, "r:*") as tf:
+                source = tf.extractfile(member.name)
+                if source is None:
+                    raise KeyError(member.name)
+                with open(temp_path, "wb") as out:
+                    out.write(source.read())
+        else:
+            # 7z and rar both support writing a single member to stdout.
+            tool = _which("7z") or _which("bsdtar")
+            if tool is None:
+                raise RuntimeError("no tool available to extract a nested archive")
+            argv = (
+                [tool, "x", "-so", archive_path, member.name]
+                if tool.endswith("7z.exe") or "7z" in os.path.basename(tool)
+                else [tool, "-xOf", archive_path, member.name]
+            )
+            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                argv, capture_output=True, check=False, timeout=TOOL_TIMEOUT
+            )
+            if completed.returncode != 0:
+                raise RuntimeError("extraction failed")
+            with open(temp_path, "wb") as out:
+                out.write(completed.stdout)
+    except Exception as exc:  # noqa: BLE001 - one bad nested archive is a note
+        report(f"{member.path}: {type(exc).__name__}: {exc}")
+        with contextlib.suppress(OSError):
+            os.unlink(temp_path)
+        return None
+
+    return temp_path
+
+
+def _suffix_of(name: str) -> str:
+    """A filename suffix that preserves the archive type of *name*."""
+    lowered = name.lower()
+    for candidate in (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar"):
+        if lowered.endswith(candidate):
+            return candidate
+    dot = lowered.rfind(".")
+    return lowered[dot:] if dot > 0 else ".bin"
 
 
 def _read_zstd_tar(path: str, report: ErrorCallback) -> Iterator[Member]:
@@ -281,9 +402,10 @@ def _read_tar(path: str, report: ErrorCallback) -> Iterator[Member]:
             # reporting their target's size would double-count, exactly as in
             # the filesystem walk.
             size = 0 if info.issym() or info.islnk() else int(info.size or 0)
+            cleaned = name.rstrip("/") or name
             yield Member(
-                name=name.rstrip("/") or name,
-                path=_member_path(path, name),
+                name=cleaned,
+                path=_member_path(path, cleaned),
                 size=size,
                 type=kind,
             )
@@ -307,9 +429,13 @@ def _read_zip(path: str, report: ErrorCallback) -> Iterator[Member]:
         for info in infos:
             name = info.filename
             is_dir = info.is_dir() or name.endswith("/")
+            # Directory members are named with a trailing slash in the zip
+            # catalog; the slash is stripped so the name matches the style used
+            # everywhere else (and so a report shows "dir", not "dir/").
+            cleaned = name.rstrip("/") or name
             yield Member(
-                name=name.rstrip("/") or name,
-                path=_member_path(path, name),
+                name=cleaned,
+                path=_member_path(path, cleaned),
                 size=0 if is_dir else int(info.file_size or 0),
                 type=DIR if is_dir else FILE,
             )
@@ -582,13 +708,35 @@ def _zip_is_encrypted(path: str) -> bool:
 def _member_path(archive_path: str, member_name: str) -> str:
     """Build the display path for a member.
 
-    The archive path and member name are joined with a separator that cannot be
-    confused with a real directory separator, so a member named ``../etc`` -- the
-    "zip slip" shape -- is visibly *inside the archive* rather than looking like
-    a path that was actually walked. Nothing here is ever resolved against the
-    filesystem.
+    Both halves are normalised to POSIX separators, because member paths are
+    *display* strings that must read the same on every platform and must match
+    the spelling the walk uses for real files.  On Windows the archive may
+    arrive as ``C:\\dir\\a.zip`` even though the walk reports ``/c/dir/a.zip``,
+    and 7-Zip reports member names with backslashes even for POSIX archives.
+
+    The archive and member are joined with :data:`MEMBER_SEPARATOR` rather than
+    a path separator, so a member named ``../etc`` -- the "zip slip" shape -- is
+    visibly *inside the archive* rather than looking like a path that was
+    actually walked.  Nothing here is ever resolved against the filesystem.
     """
-    return f"{archive_path}{MEMBER_SEPARATOR}{member_name}"
+    return f"{_to_posix(archive_path)}{MEMBER_SEPARATOR}{_to_posix(member_name)}"
+
+
+def _to_posix(value: str) -> str:
+    """Normalise a path to the package's canonical POSIX display form.
+
+    Two normalisations are needed and they are different:
+
+    * separators -- ``C:\\dir\\a.zip`` and 7-Zip's backslash member names both
+      become forward slashes;
+    * drive letters -- ``C:/dir`` becomes ``/c/dir``, because that is the form
+      the walk reports for real files, and member paths must match it or a
+      report would show an archive and its members with different prefixes.
+    """
+    normalised = value.replace("\\", "/")
+    if len(normalised) >= 2 and normalised[1] == ":" and normalised[0].isalpha():
+        normalised = "/" + normalised[0].lower() + normalised[2:]
+    return normalised
 
 
 #: Separator between an archive and its members. Chosen to be unmistakable and

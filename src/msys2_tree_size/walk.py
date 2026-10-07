@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import hashing, paths, sizes
+from . import archive, hashing, paths, sizes
 
 DIR = "dir"
 FILE = "file"
@@ -46,6 +46,13 @@ class Entry:
     child_count: int
     percent_of_parent: float
     error: str | None = None
+    #: When this entry is a member of an archive rather than a real file, the
+    #: path of the archive it came from. ``None`` for everything else, which
+    #: lets a report tell a real file apart from one inside a container.
+    container: str | None = None
+    #: For an archive file, how many members were read from it. ``None`` when
+    #: the file is not an archive, or when penetration was disabled.
+    member_count: int | None = None
 
     @property
     def human(self) -> str:
@@ -55,6 +62,11 @@ class Entry:
     @property
     def is_dir(self) -> bool:
         return self.type == DIR
+
+    @property
+    def is_member(self) -> bool:
+        """True when this entry lives inside an archive, not on disk."""
+        return self.container is not None
 
     def as_dict(self) -> dict[str, Any]:
         """Plain-dict view with a stable key order for serialisation."""
@@ -70,6 +82,8 @@ class Entry:
             "child_count": self.child_count,
             "percent_of_parent": self.percent_of_parent,
             "error": self.error,
+            "container": self.container,
+            "member_count": self.member_count,
         }
 
 
@@ -264,6 +278,9 @@ def walk(
     max_depth: int | None = None,
     hash_contents: bool = True,
     on_error: ErrorCallback | None = None,
+    penetrate_archives: bool = False,
+    archive_depth: int = 1,
+    max_archive_size: int | None = None,
 ) -> Iterator[Entry]:
     """Traverse *root* and yield an :class:`Entry` per object, post-order.
 
@@ -278,6 +295,13 @@ def walk(
         size-only scan.
     :param on_error: called with the path of every object that could not be
         read.  Errors never abort the traversal.
+    :param penetrate_archives: when true, also read inside archive files (tar,
+        zip, jar, docx, 7z, rar, ...) and report their members.  Off by default
+        because opening every archive can be expensive on a large tree.
+    :param archive_depth: how many levels of *nested* archives to read.  ``1``
+        reads archives found on disk; ``0`` disables penetration entirely.
+    :param max_archive_size: skip archives larger than this many bytes.  The
+        archive itself is still listed; only its contents are omitted.
 
     The root must be a directory; if it is not (or does not exist), nothing is
     yielded.
@@ -307,15 +331,27 @@ def walk(
     if _classify(st) != DIR:
         return
 
+    context = _Context(
+        fs=fs,
+        max_depth=max_depth,
+        hash_contents=hash_contents,
+        on_error=on_error,
+        penetrate_archives=penetrate_archives,
+        archive_depth=archive_depth,
+        max_archive_size=max_archive_size,
+        # Archive penetration is meaningless for an injected fake filesystem:
+        # its "files" are byte strings in a dict, not real containers.  It is
+        # also pointless when the caller asked for no recursion.
+        archives_enabled=bool(penetrate_archives) and archive_depth > 0 and not adapter,
+    )
+
     yield from _descend(
-        fs,
+        context,
         display_root,
         paths.basename(display_root) or display_root,
         None,
         0,
-        max_depth,
-        hash_contents,
-        on_error,
+        archive_level=0,
     )
 
 
@@ -324,24 +360,42 @@ def _is_adapter(root: Any) -> bool:
     return not isinstance(root, (str, bytes, os.PathLike))
 
 
+@dataclass
+class _Context:
+    """Traversal-wide settings, bundled so the recursive call stays readable."""
+
+    fs: Any
+    max_depth: int | None
+    hash_contents: bool
+    on_error: ErrorCallback | None
+    penetrate_archives: bool
+    archive_depth: int
+    max_archive_size: int | None
+    archives_enabled: bool
+
+
 def _descend(
-    fs: Any,
+    ctx: _Context,
     path: str,
     name: str,
     parent: str | None,
     depth: int,
-    max_depth: int | None,
-    hash_contents: bool,
-    on_error: ErrorCallback | None,
+    *,
+    archive_level: int = 0,
 ) -> Iterator[Entry]:
-    """Recursively measure *path*, yielding children before *path* itself."""
-    emit = max_depth is None or depth <= max_depth
+    """Recursively measure *path*, yielding children before *path* itself.
+
+    ``archive_level`` counts how many archives deep this call is. It is ``0``
+    for everything on disk, ``1`` for members of an archive found on disk, and
+    so on; it is bounded by ``ctx.archive_depth``.
+    """
+    emit = ctx.max_depth is None or depth <= ctx.max_depth
 
     try:
-        children = fs.scandir(path)
+        children = ctx.fs.scandir(path)
     except OSError as exc:
-        if on_error is not None:
-            on_error(path)
+        if ctx.on_error is not None:
+            ctx.on_error(path)
         unreadable = Entry(
             path=path,
             name=name,
@@ -373,34 +427,41 @@ def _descend(
 
         if kind == DIR:
             child = yield from _descend(
-                fs,
+                ctx,
                 child_path,
                 child_name,
                 path,
                 depth + 1,
-                max_depth,
-                hash_contents,
-                on_error,
+                archive_level=archive_level,
             )
         elif kind in (FILE, LINK, OTHER):
-            child = _measure_leaf(
-                fs, child_path, child_name, path, depth + 1, kind, hash_contents, on_error
-            )
-            if max_depth is None or depth + 1 <= max_depth:
+            child = _measure_leaf(ctx, child_path, child_name, path, depth + 1, kind)
+            if ctx.max_depth is None or depth + 1 <= ctx.max_depth:
                 yield child
+
+            # Archive members are counted *in addition to* the archive file
+            # itself, so a directory total reflects what its archives hold
+            # rather than only the compressed container size.
+            if kind == FILE and ctx.archives_enabled and archive_level < ctx.archive_depth:
+                members = list(_archive_members(ctx, child, child_path, depth + 1, archive_level))
+                for member in members:
+                    yield member
+                child.member_count = len(members)
+                for member in members:
+                    total += member.size
         else:  # pragma: no cover - _classify only returns the four constants
             continue
 
         total += child.size
         count += 1
         level.append(child)
-        if hash_contents:
+        if ctx.hash_contents:
             merkle_input.append((child.name, child.sha256 or hashing.NULL_HASH))
 
     for child in level:
         child.percent_of_parent = sizes.percentage(child.size, total)
 
-    digest = hashing.merkle_hash(merkle_input) if hash_contents else hashing.NULL_HASH
+    digest = hashing.merkle_hash(merkle_input) if ctx.hash_contents else hashing.NULL_HASH
 
     self_entry = Entry(
         path=path,
@@ -421,14 +482,12 @@ def _descend(
 
 
 def _measure_leaf(
-    fs: Any,
+    ctx: _Context,
     path: str,
     name: str,
     parent: str,
     depth: int,
     kind: str,
-    hash_contents: bool,
-    on_error: ErrorCallback | None,
 ) -> Entry:
     """Measure a non-directory entry, tolerating unreadable objects.
 
@@ -446,17 +505,17 @@ def _measure_leaf(
     size = 0
 
     try:
-        st = fs.stat(path)
+        st = ctx.fs.stat(path)
         if kind != LINK:
             size = int(getattr(st, "st_size", 0) or 0)
     except OSError as exc:
         error = str(exc)
-        if on_error is not None:
-            on_error(path)
+        if ctx.on_error is not None:
+            ctx.on_error(path)
 
     digest = hashing.NULL_HASH
-    if hash_contents and kind == FILE and error is None:
-        digest = fs.hash(path)
+    if ctx.hash_contents and kind == FILE and error is None:
+        digest = ctx.fs.hash(path)
 
     return Entry(
         path=path,
@@ -470,3 +529,59 @@ def _measure_leaf(
         percent_of_parent=0.0,
         error=error,
     )
+
+
+def _archive_members(
+    ctx: _Context,
+    entry: Entry,
+    path: str,
+    depth: int,
+    archive_level: int,
+) -> Iterator[Entry]:
+    """Yield the members of the archive at *path*, if it is one worth reading.
+
+    Members are emitted with a depth one greater than the archive's own but are
+    *not* treated as directory children: their ``parent`` is the archive path,
+    and their paths contain :data:`archive.MEMBER_SEPARATOR`, so nothing can
+    mistake them for real filesystem entries.
+    """
+    # Only files that look like archives are opened; this keeps an ordinary
+    # scan from touching every file it meets.
+    if not archive.formats.is_archive(entry.name):
+        return
+
+    if ctx.max_archive_size is not None and entry.size > ctx.max_archive_size:
+        # The archive is still listed; only its contents are skipped.
+        entry.member_count = 0
+        return
+
+    # ``path`` is the canonical display form, which under MSYS2 is POSIX
+    # ("/c/Users").  A native Windows interpreter cannot open that, so it is
+    # converted to a form this process can actually read before handing it to
+    # the archive reader.
+    openable = paths.resolve_for_os(path)
+
+    # How many more archive levels this member may itself contain. The walk
+    # already knows how deep it is (`archive_level`); the reader handles the
+    # nesting internally, so it is told the remaining budget.
+    remaining = max(1, ctx.archive_depth - archive_level)
+
+    count = 0
+    for member in archive.read(openable, on_error=ctx.on_error, max_depth=remaining):
+        count += 1
+        yield Entry(
+            path=member.path,
+            name=member.name,
+            parent=entry.path,
+            type=member.type,
+            depth=depth,
+            size=member.size,
+            sha256=hashing.NULL_HASH,
+            child_count=0,
+            percent_of_parent=0.0,
+            error=member.error,
+            container=entry.path,
+        )
+
+    if count == 0:
+        entry.member_count = 0

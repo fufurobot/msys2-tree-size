@@ -24,7 +24,6 @@ import unittest
 import zipfile
 
 from msys2_tree_size import walk
-
 from support import TempDirTestCase
 
 
@@ -36,11 +35,16 @@ class WalkArchiveTestCase(TempDirTestCase):
     def setUp(self):
         self.root = self.make_temp_dir()
 
-    def make_zip(self, name="a.zip", inner_size=500, members=1):
+    def make_zip(self, name="a.zip", inner_size=500, members=1, compress=True):
         path = self.root / name
-        with zipfile.ZipFile(path, "w") as zf:
+        # Highly repetitive data, so deflate actually compresses it. A payload of
+        # random-ish bytes would be stored nearly verbatim and the "compressed is
+        # smaller than the payload" property would not hold at all.
+        payload = (b"abcdefgh" * (inner_size // 8 + 1))[:inner_size]
+        mode = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
+        with zipfile.ZipFile(path, "w", mode) as zf:
             for i in range(members):
-                zf.writestr(f"file{i}.txt", "x" * inner_size)
+                zf.writestr(f"file{i}.txt", payload)
         return path
 
     def make_tar(self, name="a.tar", inner_size=700):
@@ -72,11 +76,14 @@ class TestArchivePenetrationOffByDefault(WalkArchiveTestCase):
         self.assertEqual(entry.size, archive_path.stat().st_size)
 
     def test_archive_size_is_not_the_sum_of_its_contents(self):
-        # A zip holding 200 KiB of compressible data must not report 200 KiB in
-        # an ordinary walk; that only happens with penetration enabled.
-        archive_path = self.make_zip(inner_size=200_000, members=1)
+        # Four 50 KB members of repetitive data compress heavily, so an ordinary
+        # walk must report far less than the 200 KB payload total. Without a
+        # compressible payload this property would not hold, which is why the
+        # fixture builds one instead of using arbitrary bytes.
+        members_total = 200_000
+        archive_path = self.make_zip(inner_size=50_000, members=4)
         entry = by_path(self.root)[self.key(archive_path)]
-        self.assertLess(entry.size, 200_000)
+        self.assertLess(entry.size, members_total // 4)
 
     def test_no_members_are_emitted(self):
         self.make_zip()
@@ -86,7 +93,7 @@ class TestArchivePenetrationOffByDefault(WalkArchiveTestCase):
 
 class TestArchivePenetration(WalkArchiveTestCase):
     def test_members_are_emitted_when_enabled(self):
-        archive_path = self.make_zip(members=2)
+        self.make_zip(members=2)
         entries = by_path(self.root, penetrate_archives=True)
         members = [p for p in entries if "::" in p]
         self.assertEqual(len(members), 2)
@@ -104,11 +111,9 @@ class TestArchivePenetration(WalkArchiveTestCase):
         self.assertEqual(member.size, 500)
 
     def test_directory_total_includes_archive_contents(self):
-        archive_path = self.make_zip(inner_size=500, members=3)
+        self.make_zip(inner_size=500, members=3)
         plain = by_path(self.root)[self.key(self.root)].size
-        penetrated = by_path(self.root, penetrate_archives=True)[
-            self.key(self.root)
-        ].size
+        penetrated = by_path(self.root, penetrate_archives=True)[self.key(self.root)].size
         self.assertEqual(penetrated, plain + 1500)
 
     def test_tar_contents_are_included(self):
@@ -176,18 +181,14 @@ class TestArchiveSizeGuard(WalkArchiveTestCase):
 
     def test_max_archive_size_skips_large_archives(self):
         archive_path = self.make_zip(inner_size=500)
-        entries = by_path(
-            self.root, penetrate_archives=True, max_archive_size=1
-        )
+        entries = by_path(self.root, penetrate_archives=True, max_archive_size=1)
         self.assertFalse(any("::" in p for p in entries))
         # The archive itself is still listed.
         self.assertIn(self.key(archive_path), entries)
 
     def test_max_archive_size_allows_small_archives(self):
         self.make_zip(inner_size=500)
-        entries = by_path(
-            self.root, penetrate_archives=True, max_archive_size=10 * 1024 * 1024
-        )
+        entries = by_path(self.root, penetrate_archives=True, max_archive_size=10 * 1024 * 1024)
         self.assertTrue(any("::" in p for p in entries))
 
 
@@ -231,6 +232,16 @@ class TestArchiveMaxDepthInteraction(WalkArchiveTestCase):
 
         entries = by_path(self.root, penetrate_archives=True, max_depth=1)
         self.assertNotIn(self.key(deep), entries)
+
+    def test_member_paths_use_posix_separators(self):
+        # Member paths are display strings and must read the same everywhere,
+        # matching the spelling the walk uses for real files.
+        path = self.root / "d.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("dir/file.txt", "x" * 10)
+        entries = by_path(self.root, penetrate_archives=True)
+        for member_path in (p for p in entries if "::" in p):
+            self.assertNotIn("\\", member_path.split("::", 1)[1], member_path)
 
     def test_archive_members_do_not_make_the_walk_descend(self):
         # A member named like a directory must not produce entries below it.

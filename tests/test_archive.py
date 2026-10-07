@@ -76,8 +76,13 @@ class TestTarReading(ArchiveTestCase):
 
     def test_paths_are_prefixed_with_the_archive(self):
         path = self.make_tar()
+        from msys2_tree_size import paths as paths_mod
+
+        # Member paths are reported in the canonical POSIX display form, so the
+        # prefix is the normalised archive path rather than the raw one.
+        prefix = paths_mod.to_posix(str(path))
         for entry in archive.read(path):
-            self.assertTrue(entry.path.startswith(str(path)), entry.path)
+            self.assertTrue(entry.path.startswith(prefix), entry.path)
 
     def test_gzip_tar(self):
         entries = {e.name: e for e in archive.read(self.make_tar("t.tar.gz", "w:gz"))}
