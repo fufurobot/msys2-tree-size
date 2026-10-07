@@ -76,3 +76,8 @@ ignore = [
 # on str and bytes so names containing lone surrogates are never pushed back
 # through pathlib's filesystem codec.
 "src/msys2_tree_size/paths.py" = ["PTH"]
+# archive.py opens containers whose names may contain lone surrogates, so it
+# stays on os.path for the same reason.  SIM115 is suppressed for the
+# tarfile/zipfile opens: the handle has to be created inside a try/except and
+# only then handed to `with`, which is what closes it.
+"src/msys2_tree_size/archive.py" = ["PTH", "SIM115"]

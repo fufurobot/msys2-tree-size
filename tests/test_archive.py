@@ -20,7 +20,6 @@ import unittest
 import zipfile
 
 from msys2_tree_size import archive
-
 from support import TempDirTestCase
 
 

@@ -163,18 +163,33 @@ class TestIsArchive(unittest.TestCase):
         self.assertFalse(formats.is_archive(""))
 
 
-class TestEncryptedDetection(unittest.TestCase):
-    """Encrypted archives cannot be read, so they must be identified, not guessed."""
+class TestEncryptedNameHeuristic(unittest.TestCase):
+    """The name heuristic only flags explicit markers.
 
-    def test_zip_with_encrypted_flag_is_reported(self):
-        self.assertTrue(formats.looks_encrypted_name("secret.zip"))
-        self.assertFalse(formats.looks_encrypted_name("plain.zip"))
+    A name is not evidence of encryption, so the heuristic deliberately does not
+    guess from words like "secret" or "private" -- it would produce false
+    positives on ordinary files. It exists solely to annotate output; the
+    authoritative check inspects the container itself (see test_archive).
+    """
 
-    def test_rar_naming_convention(self):
+    def test_explicit_marker_in_name_is_flagged(self):
+        for name in (
+            "backup-encrypted.zip",
+            "data_encrypted.7z",
+            "vault.encrypted.rar",
+            "archive-password.zip",
+        ):
+            self.assertTrue(formats.looks_encrypted_name(name), name)
+
+    def test_rar_multipart_naming_is_flagged(self):
+        # "-part1.rar" is how encrypted multi-volume sets are conventionally
+        # named, and the parts are useless individually.
         self.assertTrue(formats.looks_encrypted_name("secret-part1.rar"))
 
     def test_ordinary_names_are_not_flagged(self):
-        for name in ("a.tar.gz", "b.zip", "c.7z", "notes.txt"):
+        # Including names that merely *sound* secret; guessing here would be
+        # wrong far more often than right.
+        for name in ("a.tar.gz", "b.zip", "c.7z", "notes.txt", "secret.zip", "private.rar"):
             self.assertFalse(formats.looks_encrypted_name(name), name)
 
 
