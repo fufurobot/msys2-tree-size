@@ -168,10 +168,15 @@ jobs:
 
           # The default interpreter is the one baked into the bundle, so a user
           # running msys2-tree-size gets a working command with no setup.
+          #
+          # UV_TOOL_BIN_DIR puts the executables inside the bundle. The default
+          # (~/.local/bin) is outside it and is not on the MSYS2 PATH, which
+          # made the freshly installed command invisible to the next step.
           $script = @"
           set -eu
           export UV_PYTHON_INSTALL_DIR=/clang64/uv-python
           export UV_TOOL_DIR=/clang64/uv-tools
+          export UV_TOOL_BIN_DIR=/clang64/bin
           export UV_CACHE_DIR=/clang64/uv-cache
           export UV_LINK_MODE=copy
           cd '$posix'
@@ -186,24 +191,45 @@ jobs:
           & $shell -defterm -no-start -clang64 -here -c "bash $posixScript"
           if ($LASTEXITCODE -ne 0) { throw "uv tool install failed ($LASTEXITCODE)" }
 
+          # Prove the executable really landed where the bundle expects, rather
+          # than trusting that the install reported success.
+          $exe = Join-Path $env:MSYS2_ROOT "clang64\bin\msys2-tree-size.exe"
+          if (-not (Test-Path $exe)) { throw "console script not found at $exe" }
+          Write-Host "console script: $exe"
+
       - name: Verify the tool runs from inside the bundle
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $shell = Join-Path $env:MSYS2_ROOT "msys2_shell.cmd"
 
-          & $shell -defterm -no-start -clang64 -here -c "msys2-tree-size --version"
-          if ($LASTEXITCODE -ne 0) { throw "bundled console script failed" }
-
           # `devices` is the reason MSYS2 is bundled at all: it needs the
           # runtime's virtual /dev and /proc, which no plain Win32 process can
           # read without going through the MSYS2 runtime.
-          Write-Host "--- devices ---"
-          & $shell -defterm -no-start -clang64 -here -c "msys2-tree-size devices" | Write-Host
-          if ($LASTEXITCODE -ne 0) { throw "devices failed in the bundle" }
+          #
+          # The work runs from a script file so that a failure reports the real
+          # error instead of a bare exit code from a mangled command line.
+          $script = @'
+          set -eu
+          echo "--- version ---"
+          msys2-tree-size --version
+          echo "--- devices ---"
+          msys2-tree-size devices
+          echo "--- du ---"
+          msys2-tree-size du src --flat --top 3
+          echo "--- archives ---"
+          msys2-tree-size du src --flat --archives --top 3
+          echo "--- backends ---"
+          python -c "from msys2_tree_size import archive; print(archive.available_backends())"
+          '@
+          $scriptPath = Join-Path $env:RUNNER_TEMP "verify.sh"
+          [System.IO.File]::WriteAllText($scriptPath, $script.Replace("`r`n", "`n"))
 
-          Write-Host "--- du ---"
-          & $shell -defterm -no-start -clang64 -here -c "msys2-tree-size du src --flat --top 3" | Write-Host
+          $posixScript = $scriptPath -replace '\\', '/'
+          $posixScript = "/$($posixScript.Substring(0,1).ToLower())$($posixScript.Substring(2))"
+
+          & $shell -defterm -no-start -clang64 -here -c "bash $posixScript" | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "verification inside the bundle failed ($LASTEXITCODE)" }
 
       - name: Write the convenience launcher
         shell: pwsh
