@@ -122,6 +122,11 @@ jobs:
       # Build and verify the project against every supported CPython. uv keeps
       # its Python installs and environments inside the bundle, so the shipped
       # tree is self-contained and nothing is read from the build user's profile.
+      #
+      # The work is written to a shell script rather than passed through
+      # `msys2_shell.cmd -c "..."`: nesting a `python -c "..."` inside that
+      # argument requires escaping that PowerShell and cmd.exe both mangle, and
+      # a mangled command fails with a bare exit code that says nothing.
       - name: Build against the CPython matrix
         shell: pwsh
         run: |
@@ -130,19 +135,28 @@ jobs:
           $posix = $env:GITHUB_WORKSPACE -replace '\\', '/'
           $posix = "/$($posix.Substring(0,1).ToLower())$($posix.Substring(2))"
 
-          $uvEnv = "UV_PYTHON_INSTALL_DIR=/clang64/uv-python " +
-                   "UV_TOOL_DIR=/clang64/uv-tools " +
-                   "UV_CACHE_DIR=/clang64/uv-cache " +
-                   "UV_LINK_MODE=copy"
+          $script = @"
+          set -eu
+          export UV_PYTHON_INSTALL_DIR=/clang64/uv-python
+          export UV_TOOL_DIR=/clang64/uv-tools
+          export UV_CACHE_DIR=/clang64/uv-cache
+          export UV_LINK_MODE=copy
+          cd '$posix'
+          for version in ${{ env.PYTHON_MATRIX }}; do
+            echo "::group::CPython \$version"
+            uv run --python "\$version" --with . python -c 'import sys; print("OK", sys.version.split()[0], sys.platform)'
+            echo "::endgroup::"
+          done
+          "@
+          $scriptPath = Join-Path $env:RUNNER_TEMP "matrix.sh"
+          # LF endings: a script with CRLF breaks `set -eu` on the first line.
+          [System.IO.File]::WriteAllText($scriptPath, $script.Replace("`r`n", "`n"))
 
-          foreach ($version in "${{ env.PYTHON_MATRIX }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)) {
-            Write-Host "::group::CPython $version"
-            $probe = "import sys; print('OK', sys.version.split()[0], sys.platform, sys.executable)"
-            $cmd = "$uvEnv && cd '$posix' && uv run --python $version --with . python -c `"$probe`""
-            & $shell -defterm -no-start -clang64 -here -c $cmd
-            if ($LASTEXITCODE -ne 0) { throw "CPython $version build failed ($LASTEXITCODE)" }
-            Write-Host "::endgroup::"
-          }
+          $posixScript = $scriptPath -replace '\\', '/'
+          $posixScript = "/$($posixScript.Substring(0,1).ToLower())$($posixScript.Substring(2))"
+
+          & $shell -defterm -no-start -clang64 -here -c "bash $posixScript"
+          if ($LASTEXITCODE -ne 0) { throw "CPython matrix build failed ($LASTEXITCODE)" }
 
       - name: Install the console script into the bundle
         shell: pwsh
@@ -154,13 +168,22 @@ jobs:
 
           # The default interpreter is the one baked into the bundle, so a user
           # running msys2-tree-size gets a working command with no setup.
-          $uvEnv = "UV_PYTHON_INSTALL_DIR=/clang64/uv-python " +
-                   "UV_TOOL_DIR=/clang64/uv-tools " +
-                   "UV_CACHE_DIR=/clang64/uv-cache " +
-                   "UV_LINK_MODE=copy"
+          $script = @"
+          set -eu
+          export UV_PYTHON_INSTALL_DIR=/clang64/uv-python
+          export UV_TOOL_DIR=/clang64/uv-tools
+          export UV_CACHE_DIR=/clang64/uv-cache
+          export UV_LINK_MODE=copy
+          cd '$posix'
+          uv tool install --python ${{ env.DEFAULT_PYTHON }} --force .
+          "@
+          $scriptPath = Join-Path $env:RUNNER_TEMP "install.sh"
+          [System.IO.File]::WriteAllText($scriptPath, $script.Replace("`r`n", "`n"))
 
-          $cmd = "$uvEnv && cd '$posix' && uv tool install --python ${{ env.DEFAULT_PYTHON }} --force ."
-          & $shell -defterm -no-start -clang64 -here -c $cmd
+          $posixScript = $scriptPath -replace '\\', '/'
+          $posixScript = "/$($posixScript.Substring(0,1).ToLower())$($posixScript.Substring(2))"
+
+          & $shell -defterm -no-start -clang64 -here -c "bash $posixScript"
           if ($LASTEXITCODE -ne 0) { throw "uv tool install failed ($LASTEXITCODE)" }
 
       - name: Verify the tool runs from inside the bundle
