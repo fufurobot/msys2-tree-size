@@ -16,7 +16,6 @@ import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 
 from msys2_tree_size import cli, report
-
 from support import TempDirTestCase
 
 
@@ -92,9 +91,7 @@ class TestDuArchiveFlags(CliArchiveTestCase):
 
     def test_max_archive_size_skips_large_archives(self):
         root = self.make_tree()
-        _, out, _ = self.run_cli(
-            "du", root, "--flat", "--archives", "--max-archive-size", "1"
-        )
+        _, out, _ = self.run_cli("du", root, "--flat", "--archives", "--max-archive-size", "1")
         self.assertNotIn("inside.txt", out)
         # The archive itself is still listed.
         self.assertIn("bundle.zip", out)
@@ -142,6 +139,84 @@ class TestArchiveSummary(CliArchiveTestCase):
         _, out, _ = self.run_cli("du", root, "--json", "--archives")
         summary = json.loads(out)["summary"]
         self.assertGreaterEqual(summary["file_count"], 4)
+
+
+class TestArchiveTreeRendering(CliArchiveTestCase):
+    """Members must nest under their archive, never float to the top level.
+
+    Both bugs below were found by running against real archives. The second
+    existed only for 7z, whose directory entries are marked in a way tar and zip
+    do not use.
+    """
+
+    @staticmethod
+    def indent_of(line: str) -> int:
+        """Depth of *line* in the tree, counted from its connector glyphs.
+
+        Tree nesting is drawn with ``|``, `` ` `` and ``-`` rather than spaces,
+        so counting leading whitespace would measure the right-aligned size
+        column instead of the depth.
+        """
+        stripped = line.lstrip()
+        depth = 0
+        index = 0
+        while index < len(stripped):
+            if stripped.startswith(("|-- ", "`-- "), index):
+                return depth
+            if stripped.startswith(("|   ", "    "), index):
+                depth += 1
+                index += 4
+                continue
+            break
+        return depth
+
+    def test_members_are_indented_under_their_archive(self):
+        root = self.make_tree()
+        _, out, _ = self.run_cli("du", root, "--archives")
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        archive_line = next(ln for ln in lines if "bundle.zip" in ln)
+        member_line = next(ln for ln in lines if "inside.txt" in ln)
+        self.assertLess(self.indent_of(archive_line), self.indent_of(member_line))
+
+    def test_top_limit_does_not_orphan_members(self):
+        # When --top drops an archive entry, its members must disappear with it
+        # rather than being promoted to roots, which would claim a file exists
+        # at a path nothing describes.
+        root = self.make_tree()
+        _, out, _ = self.run_cli("du", root, "--archives", "--top", "2")
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        top_level = [ln for ln in lines if ln.startswith(("|--", "`--"))]
+        self.assertFalse(
+            [ln for ln in top_level if "::" in ln],
+            f"members rendered at top level: {top_level}",
+        )
+
+    def test_seven_zip_directories_are_typed_as_directories(self):
+        import shutil
+        import subprocess
+
+        from msys2_tree_size import walk
+
+        if shutil.which("7z") is None:
+            self.skipTest("7z not available")
+
+        root = self.make_temp_dir()
+        payload = root / "payload"
+        payload.mkdir()
+        (payload / "f.txt").write_bytes(b"x" * 100)
+        subprocess.run(
+            ["7z", "a", "-bso0", "-bsp0", str(root / "a.7z"), "payload"],
+            cwd=str(root),
+            check=True,
+            capture_output=True,
+        )
+
+        entries = {e.path: e for e in walk.walk(str(root), penetrate_archives=True)}
+        member_dirs = {p: e for p, e in entries.items() if "::" in p and e.type == "dir"}
+        # 7z marks directories via `Attributes = D...` and emits no `Folder`
+        # line for them, so a parser keyed only on `Folder` types them as files.
+        self.assertTrue(member_dirs, "no directory members found in the 7z archive")
+        self.assertTrue(all(e.size == 0 for e in member_dirs.values()))
 
 
 class TestReportRendering(CliArchiveTestCase):

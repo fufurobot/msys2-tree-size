@@ -592,14 +592,18 @@ def _list_with(tool: str, tool_name: str, path: str) -> str | None:
 def _parse_listing(text: str, path: str) -> Iterator[Member]:
     """Parse ``7z l -slt`` or ``bsdtar -tf`` output into members.
 
-    Two normalisations are needed because the tools are inconsistent:
+    Three normalisations are needed because the tools are inconsistent:
 
     * **Separators.** On Windows, 7-Zip reports member names with backslashes
       even for a POSIX-style archive. Member names are always reported with
       forward slashes so they read the same on every platform.
-    * **Directories.** ``7z`` marks them with ``Folder = +``, but ``bsdtar -tf``
-      only appends a trailing ``/``. Both shapes are recognised, and a bare
-      name list (bsdtar) has no size information at all, so sizes come out 0
+    * **Directories.** ``7z`` marks them with ``Folder = +`` *or* an
+      ``Attributes = D...`` string (measured: the directory entries of a 7z
+      archive carry ``Attributes = D_ drwxr-xr-x`` and no ``Folder`` line at
+      all, so relying on ``Folder`` alone types directories as files).
+      ``bsdtar -tf`` instead appends a trailing ``/``. All three shapes are
+      recognised.
+    * **Sizes.** A bare name list (bsdtar) carries no sizes, so they come out 0
       rather than being invented.
     """
     name: str | None = None
@@ -611,6 +615,9 @@ def _parse_listing(text: str, path: str) -> Iterator[Member]:
         if name is None:
             return None
         cleaned = name.replace("\\", "/")
+        # A 7z "directory" header row is sometimes named without a trailing
+        # slash; the attributes are what decide, and that is handled above.
+        cleaned = cleaned.rstrip("/") or cleaned
         return Member(
             name=cleaned,
             path=_member_path(path, cleaned),
@@ -644,9 +651,17 @@ def _parse_listing(text: str, path: str) -> Iterator[Member]:
             is_dir = line[len("Folder = ") :].strip() in ("+", "1")
             continue
 
+        if line.startswith("Attributes = "):
+            # "D" or "D_ drwxr-xr-x" marks a directory; "A" marks an archive
+            # member with content. 7z emits the leading letter consistently.
+            attributes = line[len("Attributes = ") :].strip()
+            if attributes[:1].upper() == "D":
+                is_dir = True
+            continue
+
         # Skip the other structured keys 7z emits between records.
         if saw_structured and (
-            line.startswith(("Attributes", "Encrypted", "Method", "CRC", "Block"))
+            line.startswith(("Encrypted", "Method", "CRC", "Block", "Host OS", "Version"))
             or line.startswith("---")
         ):
             continue
@@ -655,9 +670,10 @@ def _parse_listing(text: str, path: str) -> Iterator[Member]:
             # bsdtar -tf: one bare name per line.
             cleaned = line.replace("\\", "/")
             is_dir = cleaned.endswith("/")
+            trimmed = cleaned.rstrip("/") or cleaned
             yield Member(
-                name=cleaned.rstrip("/") or cleaned,
-                path=_member_path(path, cleaned.rstrip("/") or cleaned),
+                name=trimmed,
+                path=_member_path(path, trimmed),
                 size=0,
                 type=DIR if is_dir else FILE,
             )

@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     du = subparsers.add_parser("du", help="recursive sizes for a directory tree")
     _add_walk_options(du)
+    _add_archive_options(du)
     du.add_argument("path", help="directory to scan")
     du.add_argument("--flat", action="store_true", help="flat listing instead of a tree")
     du.add_argument(
@@ -55,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     dupes = subparsers.add_parser("dupes", help="find duplicate content by hash")
     _add_walk_options(dupes)
+    _add_archive_options(dupes)
     dupes.add_argument("path", help="directory to scan")
     dupes.add_argument("--csv", metavar="FILE", help="write a CSV report")
     dupes.add_argument("--json", action="store_true", help="write JSON to stdout")
@@ -81,6 +83,37 @@ def _add_walk_options(parser: argparse.ArgumentParser) -> None:
         "--no-hash",
         action="store_true",
         help="skip content hashing (much faster, disables duplicate detection)",
+    )
+
+
+def _add_archive_options(parser: argparse.ArgumentParser) -> None:
+    """Add the archive-penetration options shared by ``du`` and ``dupes``.
+
+    Penetration is opt-in because opening every archive on a large tree is
+    expensive; a scan should be fast unless the user asks for depth.
+    """
+    parser.add_argument(
+        "--archives",
+        action="store_true",
+        help="also read inside archive files (.tar, .zip, .7z, .rar, .jar, .docx, ...)",
+    )
+    parser.add_argument(
+        "--no-archives",
+        action="store_true",
+        help="never read inside archives, even if --archives was given",
+    )
+    parser.add_argument(
+        "--archive-depth",
+        type=int,
+        default=1,
+        metavar="N",
+        help="how many levels of nested archives to read (default: 1, 0 disables)",
+    )
+    parser.add_argument(
+        "--max-archive-size",
+        default=None,
+        metavar="SIZE",
+        help="skip archives larger than SIZE (e.g. 100M); they are still listed",
     )
 
 
@@ -145,9 +178,30 @@ def _scan(args: argparse.Namespace) -> tuple[list[Any], str] | None:
             max_depth=args.max_depth,
             hash_contents=not getattr(args, "no_hash", False),
             on_error=lambda p: print(f"{PROG}: warning: cannot read {p}", file=sys.stderr),
+            **archive_options(args),
         )
     )
     return entries, target
+
+
+def archive_options(args: argparse.Namespace) -> dict[str, Any]:
+    """Translate the archive flags into :func:`walk.walk` keyword arguments.
+
+    ``--no-archives`` is honoured over ``--archives`` so that a user can turn
+    penetration off in an alias or wrapper without having to remove the earlier
+    flag from the command line.
+    """
+    enabled = bool(getattr(args, "archives", False)) and not bool(
+        getattr(args, "no_archives", False)
+    )
+    depth = int(getattr(args, "archive_depth", 1) or 0)
+
+    max_size_raw = getattr(args, "max_archive_size", None)
+    return {
+        "penetrate_archives": enabled,
+        "archive_depth": depth,
+        "max_archive_size": sizes.parse_size(max_size_raw) if max_size_raw else None,
+    }
 
 
 def _cmd_du(args: argparse.Namespace) -> int:

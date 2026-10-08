@@ -150,11 +150,25 @@ def render_tree(
 
     glyphs = _ASCII_GLYPHS if ascii_only else _UNICODE_GLYPHS
     by_path = {str(_field(r, "path", "")): r for r in selected}
+
     children: dict[str | None, list[Any]] = {}
     for row in selected:
         parent = _field(row, "parent")
-        key = str(parent) if parent is not None and str(parent) in by_path else None
-        children.setdefault(key, []).append(row)
+        if parent is None or str(parent) == "":
+            children.setdefault(None, []).append(row)
+        elif str(parent) in by_path:
+            children.setdefault(str(parent), []).append(row)
+        elif _is_archive_member(row):
+            # The row is inside an archive whose own entry was filtered out
+            # (by --top, --max-depth or --min-size).  Its parent is gone, so it
+            # must be dropped rather than promoted to a root: rendering
+            # "data.tar.gz::payload" as a top-level line would claim a file
+            # exists at a path that no entry describes.
+            continue
+        else:
+            # An ordinary entry whose directory was filtered out.  Showing it at
+            # the top level is reasonable, since a real file does exist there.
+            children.setdefault(None, []).append(row)
 
     for group in children.values():
         group.sort(key=lambda r: (-int(_field(r, "size", 0) or 0), str(_field(r, "path", ""))))
@@ -180,6 +194,15 @@ def render_tree(
         emit(root, "", index == len(roots) - 1, True)
 
     return out.getvalue()
+
+
+def _is_archive_member(row: Any) -> bool:
+    """True when *row* lives inside an archive rather than on disk."""
+    if _field(row, "container") is not None:
+        return True
+    # Fall back to the separator, so this also works for plain dicts coming
+    # from a JSON report that predates the container field.
+    return "::" in str(_field(row, "path", ""))
 
 
 def _label(row: Any) -> str:
