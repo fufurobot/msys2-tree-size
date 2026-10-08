@@ -61,6 +61,9 @@ msys2-tree-size du /c/Users
 # only the top 20 entries, at most 2 levels deep
 msys2-tree-size du /c/Users --depth 2 --top 20
 
+# look inside archives too, and account for what they hold
+msys2-tree-size du /c/Users --archives
+
 # machine-readable
 msys2-tree-size du /c/Users --json tree.json
 
@@ -71,6 +74,43 @@ msys2-tree-size dupes /c/Users --min-size 1M
 msys2-tree-size devices
 ```
 
+## Looking inside archives
+
+A directory full of tarballs reports a few megabytes and hides hundreds.
+`--archives` opens them and adds their contents to the totals:
+
+```console
+$ msys2-tree-size du backup --flat
+273B    4.13%  file  backup/bundle.zip
+206B    3.11%  file  backup/data.tar.gz
+
+$ msys2-tree-size du backup --flat --archives
+273B    1.49%  file  backup/bundle.zip
+   2.6K  14.74%  file  backup/bundle.zip::payload/nested/b.bin
+   1.2K   6.55%  file  backup/bundle.zip::payload/a.txt
+206B    1.12%  file  backup/data.tar.gz
+   2.6K  14.74%  file  backup/data.tar.gz::payload/nested/b.bin
+```
+
+Members are shown as `archive::member`. They are **display strings, never real
+paths** — nothing is extracted to disk, and a hostile member name such as
+`../etc/passwd` is shown verbatim inside the container rather than resolved.
+
+Supported with no dependency at all: `tar`, `tar.gz`, `tar.bz2`, `tar.xz`,
+`zip`, `jar`, `apk`, `docx`, `xlsx`, `pptx`, `odt`/`ods`/`odp`, `epub`, `whl`.
+With `7z`, `unrar`, `bsdtar` or `zstd` present as well: `7z`, `rar`, `tar.zst`
+and bare `.gz`/`.xz`/`.zst`/`.bz2`. A missing tool costs exactly one format.
+
+Penetration is **opt-in**, because opening every archive on a large tree is
+expensive. Three independent limits bound the work:
+
+| Flag | Effect |
+| --- | --- |
+| `--archives` | enable reading inside archives |
+| `--no-archives` | force it off, overriding `--archives` |
+| `--archive-depth N` | levels of *nested* archives to read (default 1, `0` disables) |
+| `--max-archive-size SIZE` | skip archives larger than `SIZE`; still listed |
+
 ## Layout
 
 ```
@@ -79,6 +119,8 @@ src/msys2_tree_size/
   paths.py         byte-exact path <-> str helpers (surrogateescape)
   sizes.py         human-readable formatting and size aggregation
   hashing.py       content hashing + subtree (Merkle) hashing
+  formats.py       archive format detection by name
+  archive.py       archive readers (tar/zip stdlib, 7z/rar/zstd via tools)
   walk.py          the single filesystem traversal used by every command
   report.py        tree / flat / json renderers
   duplicates.py    duplicate grouping, local and cross-device

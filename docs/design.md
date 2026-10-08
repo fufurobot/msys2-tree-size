@@ -146,6 +146,82 @@ invoked via `cmd.exe` because it is a batch file. Where a host forbids even that
 — some sandboxes constrain child processes — the reader returns empty and the
 command reports a note rather than raising or quietly lying.
 
+## Archive penetration
+
+A directory holding tarballs reports a few megabytes and hides the hundreds
+inside them. `--archives` corrects that, and the design is shaped by three
+constraints.
+
+### Detection is separate from reading
+
+`formats.detect` is a pure decision about a *name*: it never opens anything,
+never raises, and is cheap enough to call on every entry of a large scan.
+`archive.read` touches real bytes and external tools and is allowed to fail per
+file. Mixing the two would make the cheap question pay the expensive cost.
+
+The rules encode one subtle distinction. Compound suffixes (`.tar.gz`, `.tgz`,
+`.tar.zst`) name a compressor wrapped around a tar and must be matched **before**
+a bare compressor, or `backup.tar.gz` is misread as a single gzipped file
+rather than an archive of many. A bare `.gz` then keeps its own case: it holds
+one file, whose name is derived by stripping the suffix.
+
+Many unrelated formats are zip containers and share one implementation:
+`.docx`/`.xlsx`/`.pptx`, `.odt`/`.ods`/`.odp`, `.jar`, `.apk`, `.epub`, `.whl`.
+The tests build a real `.docx` and a real `.jar` rather than trusting the list.
+
+### Backends degrade one format at a time
+
+| Format | Backend |
+| --- | --- |
+| `tar`, `tar.gz`, `tar.bz2`, `tar.xz` | `tarfile` (stdlib) |
+| `zip`, `jar`, `docx`, `apk`, … | `zipfile` (stdlib) |
+| `7z` | `7z`, else `bsdtar` |
+| `rar` | `unrar`, `7z`, else `bsdtar` |
+| `tar.zst`, bare `.zst` | `bsdtar`, else `zstd` + `tarfile` |
+
+`tarfile` has no zstd support, so a `.tar.zst` is decompressed through an
+external tool and parsed from memory with `tarfile.open(fileobj=...)`. A missing
+tool costs exactly one format; `available_backends()` reports which are usable
+so a gap can be explained rather than silently producing nothing.
+
+### Safety: nothing is ever extracted
+
+Only metadata is read, so scanning an untrusted tree cannot write files. Member
+paths are joined to the archive with a `::` separator **and are never resolved
+against the filesystem**, so a member named `../etc/passwd` — the "zip slip"
+shape — is visibly *inside* the container rather than looking like a path that
+was walked.
+
+Two bounds keep the work finite. `archive_depth` caps nested archives, because a
+zip inside a zip inside a zip is a decompression-bomb vector; `max_archive_size`
+skips archives too expensive to open while still listing them.
+
+Nested archives are the one case that needs a temporary file, since the inner
+container's bytes live inside the outer one. The temp file is always removed,
+the recursion is bounded, and the members it yields are **rebased onto the
+logical chain** (`outer.zip::inner.zip::deep.txt`) so the report never leaks the
+temporary filename.
+
+### Bugs found only by running the real thing
+
+Three defects were invisible to code that passed its tests:
+
+1. `archive.read` was handed the canonical POSIX path (`/c/...`). A native
+   Windows interpreter cannot open that, so penetration silently found nothing.
+2. Member paths came out in Windows form (`C:/dir/a.zip`) while the walk
+   reported POSIX (`/c/dir/a.zip`), so an archive and its own members had
+   different prefixes.
+3. 7-Zip marks a directory with `Attributes = D_ drwxr-xr-x` and emits **no**
+   `Folder` line for it, so a parser keyed on `Folder` typed every directory
+   inside a `.7z` as a zero-byte file. tar and zip use other markers, which is
+   why only the 7z case exposed it.
+
+A fourth was found by rendering rather than reading: with `--top`, archive
+members were promoted to top-level tree lines when their containing archive was
+filtered out, printing `data.tar.gz::payload` as a root. Members whose parent is
+filtered out are now dropped; ordinary files whose *directory* was filtered out
+are still shown, because those genuinely exist on disk.
+
 ## Testing strategy
 
 - **Unit tests** (`tests/`) never touch the real filesystem for logic: they use
