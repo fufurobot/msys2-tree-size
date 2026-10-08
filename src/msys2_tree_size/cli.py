@@ -20,7 +20,7 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
-from . import __version__, devices, duplicates, paths, report, sizes, walk
+from . import __version__, archive, devices, duplicates, paths, report, sizes, walk
 
 PROG = "msys2-tree-size"
 
@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     dev.add_argument("--json", action="store_true", help="write JSON to stdout")
     dev.add_argument("--by-id-dir", default=devices.BY_ID_DIR, help=argparse.SUPPRESS)
     dev.add_argument("--partitions", default=devices.PARTITIONS_FILE, help=argparse.SUPPRESS)
+
+    subparsers.add_parser(
+        "diagnose",
+        help="report which optional capabilities are available",
+    )
 
     return parser
 
@@ -134,6 +139,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_dupes(args)
         if args.command == "devices":
             return _cmd_devices(args)
+        if args.command == "diagnose":
+            return _cmd_diagnose(args)
     except ValueError as exc:
         # e.g. a malformed --min-size
         print(f"{PROG}: error: {exc}", file=sys.stderr)
@@ -283,6 +290,40 @@ def _cmd_dupes(args: argparse.Namespace) -> int:
         f"{summary['duplicate_files']} files, {wasted} reclaimable",
         file=sys.stderr,
     )
+    return EXIT_OK
+
+
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    """Report which optional capabilities this installation can use.
+
+    Exists because the answers depend on the machine, not on the code: whether
+    MSYS2 is installed decides whether device enumeration works at all, and
+    which archive tools exist decides which formats can be read. Reporting that
+    turns "it found nothing" into an explainable condition.
+    """
+    print(f"{PROG} {__version__}")
+    print(f"python      : {sys.version.split()[0]} ({sys.platform})")
+    print(f"executable  : {sys.executable}")
+
+    print()
+    print("MSYS2:")
+    root = paths.msys2_root()
+    print(f"  installation        : {root or '<not found>'}")
+    print(f"  POSIX-path python   : {paths.is_msys2()}")
+    shell = devices.msys2_shell()
+    print(f"  launcher            : {shell or '<not found>'}")
+    for line in devices.diagnose():
+        if line.startswith("MSYS2 root"):
+            continue
+        print(f"  {line}")
+
+    print()
+    print("archive backends:")
+    for name, usable in sorted(archive.available_backends().items()):
+        print(f"  {name:<6} {'available' if usable else 'unavailable'}")
+    print()
+    print("  tar/gzip/bzip2/xz and the zip family always work (standard library).")
+    print("  Others need their tool on PATH; a missing tool costs one format only.")
     return EXIT_OK
 
 

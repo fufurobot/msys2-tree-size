@@ -73,7 +73,52 @@ class TestParser(CliTestCase):
         parser = cli.build_parser()
         actions = [a for a in parser._actions if isinstance(a, cli.argparse._SubParsersAction)]
         self.assertTrue(actions)
-        self.assertEqual(set(actions[0].choices), {"du", "dupes", "devices"})
+        self.assertEqual(
+            set(actions[0].choices),
+            {"du", "dupes", "devices", "diagnose"},
+        )
+
+
+class TestDiagnoseCommand(CliTestCase):
+    """`diagnose` explains which optional capabilities work on this machine."""
+
+    def test_runs_successfully(self):
+        code, out, _ = self.run_cli("diagnose")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.strip())
+
+    def test_reports_the_interpreter(self):
+        _, out, _ = self.run_cli("diagnose")
+        self.assertIn("python", out.lower())
+        self.assertIn("executable", out)
+
+    def test_reports_msys2_discovery(self):
+        _, out, _ = self.run_cli("diagnose")
+        self.assertIn("MSYS2", out)
+        self.assertIn("installation", out)
+
+    def test_reports_every_archive_backend(self):
+        _, out, _ = self.run_cli("diagnose")
+        for backend in ("tar", "zip", "7z", "rar", "zstd"):
+            self.assertIn(backend, out)
+
+    def test_does_not_claim_virtual_paths_exist_when_they_do_not(self):
+        # The point of the command is to explain a missing capability, so it
+        # must not report a backend as available without evidence.
+        from msys2_tree_size import archive
+
+        _, out, _ = self.run_cli("diagnose")
+        for name, usable in archive.available_backends().items():
+            self.assertIn(name, out)
+            if not usable:
+                self.assertIn("unavailable", out)
+
+
+class TestDiagnoseIsRegistered(CliTestCase):
+    def test_subcommand_is_listed(self):
+        parser = cli.build_parser()
+        actions = [a for a in parser._actions if isinstance(a, cli.argparse._SubParsersAction)]
+        self.assertIn("diagnose", actions[0].choices)
 
 
 class TestDuCommand(CliTestCase):

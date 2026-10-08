@@ -209,6 +209,9 @@ jobs:
           #
           # The work runs from a script file so that a failure reports the real
           # error instead of a bare exit code from a mangled command line.
+          #
+          # There is deliberately no system `python` in the bundle: uv owns the
+          # interpreter, so anything needing Python goes through `uv run`.
           $script = @'
           set -eu
           echo "--- version ---"
@@ -220,7 +223,7 @@ jobs:
           echo "--- archives ---"
           msys2-tree-size du src --flat --archives --top 3
           echo "--- backends ---"
-          python -c "from msys2_tree_size import archive; print(archive.available_backends())"
+          msys2-tree-size diagnose
           '@
           $scriptPath = Join-Path $env:RUNNER_TEMP "verify.sh"
           [System.IO.File]::WriteAllText($scriptPath, $script.Replace("`r`n", "`n"))
