@@ -2,16 +2,10 @@
 
 A broken release workflow is expensive to discover: the only way to exercise it
 is to push a tag, and by then the tag is public. These tests therefore check the
-workflow's *structure* so the common mistakes fail in CI on a normal commit:
+workflow's *structure* so the common mistakes fail in CI on a normal commit.
 
-* the tag trigger is wired up at all;
-* the bundle is built from a downloaded MSYS2 release rather than any local
-  installation, so the artifact is reproducible from a clean checkout;
-* the release job cannot run before the test suite passes;
-* the shipped bundle README exists and documents how to start the thing.
-
-They intentionally do not try to parse YAML with a third-party library, because
-the package has no runtime dependencies and adding one for tests would be a poor
+They intentionally do not parse YAML with a third-party library, because the
+package has no runtime dependencies and adding one for tests would be a poor
 trade. Structure is asserted with targeted text checks instead.
 """
 
@@ -24,15 +18,17 @@ from support import REPO_ROOT
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 RELEASE = WORKFLOWS / "release.yml"
-BUNDLE_README = REPO_ROOT / "docs" / "bundle-README.md"
+# The user-facing install and usage guide. Named for what it is rather than for
+# the artifact it used to describe, since it is now the primary documentation.
+INSTALL_GUIDE = REPO_ROOT / "docs" / "install.md"
 
 
 class TestReleaseWorkflowExists(unittest.TestCase):
     def test_release_workflow_is_present(self):
         self.assertTrue(RELEASE.is_file(), f"missing {RELEASE}")
 
-    def test_bundle_readme_is_present(self):
-        self.assertTrue(BUNDLE_README.is_file(), f"missing {BUNDLE_README}")
+    def test_install_guide_is_present(self):
+        self.assertTrue(INSTALL_GUIDE.is_file(), f"missing {INSTALL_GUIDE}")
 
     def test_release_workflow_is_not_empty(self):
         self.assertGreater(len(RELEASE.read_text(encoding="utf-8").strip()), 200)
@@ -54,141 +50,66 @@ class TestReleaseTriggers(unittest.TestCase):
         # Without contents:write the release step cannot create a release.
         self.assertRegex(self.text, r"contents:\s*write")
 
-
-class TestBundleIsBuiltFromADownload(unittest.TestCase):
-    """The bundle must not depend on anyone's local MSYS2 installation.
-
-    This is the property that makes the artifact reproducible: a pristine
-    runtime is fetched inside the job, so the same tag produces the same bundle
-    on any machine.
-    """
-
-    def setUp(self):
-        self.text = RELEASE.read_text(encoding="utf-8")
-
-    def test_downloads_the_official_msys2_release(self):
-        self.assertIn("msys2/msys2-installer/releases", self.text)
-
-    def test_uses_the_base_archive_asset(self):
-        self.assertRegex(self.text, r"msys2-base-x86_64-.*\.sfx\.exe")
-
-    def test_does_not_reference_a_local_installation_path(self):
-        # A hardcoded developer path would silently make the build machine
-        # specific, which is exactly what the download step exists to avoid.
-        # Plain substring checks avoid regex escaping pitfalls with backslashes.
-        for suspicious in ("C:\\msys64", "Downloads\\msys64", "~\\msys64"):
-            self.assertNotIn(
-                suspicious,
-                self.text,
-                f"release workflow references a local install path: {suspicious}",
-            )
-
-    def test_installs_uv_from_the_msys2_repository(self):
-        # uv is the mechanism for obtaining a native Windows CPython. Taking it
-        # from MSYS2's own repository keeps the bundle self-contained and
-        # reproducible rather than depending on a separately installed tool.
-        self.assertRegex(self.text, r"pacman -S[^\n]*mingw-w64-clang-x86_64-uv")
-
-    def test_does_not_install_msys2_python(self):
-        # MSYS2's python is PEP 668 externally-managed, and uv refuses it as
-        # `Unknown operating system: mingw_x86_64_ucrt_llvm`. Installing it
-        # would reintroduce the exact failure this approach exists to avoid.
-        installs = re.findall(r"pacman -S[^\n]*", self.text)
-        for line in installs:
-            self.assertNotRegex(
-                line,
-                r"\bpython\b",
-                f"release workflow installs MSYS2 python: {line.strip()}",
-            )
-
-    def test_uses_uv_to_provide_the_interpreter(self):
-        self.assertRegex(self.text, r"uv run --python")
-        self.assertRegex(self.text, r"uv tool install")
-
-    def test_installs_the_console_script_so_it_is_on_path(self):
-        self.assertRegex(self.text, r"uv tool install[^\n]*--force[^\n]*\.")
-
-    def test_keeps_uv_state_inside_the_bundle(self):
-        # Otherwise the shipped tree would reference the build user's profile
-        # and break for anyone else.
-        for variable in ("UV_PYTHON_INSTALL_DIR", "UV_TOOL_DIR"):
-            self.assertIn(variable, self.text)
-
-    def test_installs_the_archive_tools_the_bundle_promises(self):
-        # The bundle README advertises 7z and rar support, so the packages
-        # providing them must actually be installed or the documentation lies.
-        self.assertRegex(self.text, r"pacman -S[^\n]*mingw-w64-clang-x86_64-7zip")
-        self.assertRegex(self.text, r"pacman -S[^\n]*mingw-w64-clang-x86_64-unrar")
+    def test_does_not_trigger_on_every_push(self):
+        # A push trigger with a branch filter would publish on ordinary commits.
+        push_block = re.search(r"push:\n((?:\s{4,}.*\n)+)", self.text)
+        self.assertIsNotNone(push_block, "no push trigger found")
+        assert push_block is not None
+        self.assertNotIn("branches:", push_block.group(1))
 
 
-class TestPythonMatrix(unittest.TestCase):
-    """The bundle must cover every CPython newest uv supports.
-
-    The floor is the project's declared requires-python; the ceiling is the
-    newest stable release. Pinning the minors here makes adding or dropping an
-    interpreter a deliberate, reviewable change rather than an accident.
-    """
+class TestPublishedArtifacts(unittest.TestCase):
+    """The release ships a wheel and an sdist, and verifies both install."""
 
     def setUp(self):
         self.text = RELEASE.read_text(encoding="utf-8")
-        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        declared = re.search(r'requires-python\s*=\s*">=([\d.]+)"', pyproject)
-        self.assertIsNotNone(declared, "pyproject has no requires-python floor")
-        assert declared is not None
-        self.floor = declared.group(1)
 
-    def matrix_versions(self) -> list[str]:
-        found = re.search(r'PYTHON_MATRIX:\s*"([^"]+)"', self.text)
-        self.assertIsNotNone(found, "release workflow has no PYTHON_MATRIX")
-        assert found is not None
-        return found.group(1).split()
+    def test_builds_the_distributions(self):
+        self.assertRegex(self.text, r"uv build")
 
-    def minors(self) -> list[tuple[int, int]]:
-        return [tuple(int(p) for p in v.split(".")[:2]) for v in self.matrix_versions()]
+    def test_attaches_wheel_and_sdist(self):
+        self.assertIn("*.whl", self.text)
+        self.assertIn("*.tar.gz", self.text)
 
-    def test_matrix_is_not_empty(self):
-        self.assertTrue(self.matrix_versions())
+    def test_validates_distribution_metadata(self):
+        # twine check catches a malformed README or missing license before the
+        # artifact is public; there is no way to fix it afterwards.
+        self.assertIn("twine check", self.text)
 
-    def test_matrix_is_in_ascending_order(self):
-        minors = self.minors()
-        self.assertEqual(minors, sorted(minors), "matrix is not sorted")
+    def test_installs_the_wheel_and_runs_it(self):
+        # Building successfully is not evidence the package works.
+        self.assertRegex(self.text, r"--from dist/\*\.whl")
+        self.assertRegex(self.text, r'msys2-tree-size" --version')
 
-    def test_matrix_starts_at_the_declared_floor(self):
-        floor = tuple(int(p) for p in self.floor.split(".")[:2])
-        self.assertEqual(
-            self.minors()[0],
-            floor,
-            f"matrix starts at {self.minors()[0]}, requires-python floor is {floor}",
-        )
+    def test_installs_the_sdist_and_runs_it(self):
+        self.assertRegex(self.text, r"--from dist/\*\.tar\.gz")
 
-    def test_matrix_has_no_gaps(self):
-        minors = self.minors()
-        lowest, highest = minors[0], minors[-1]
-        expected = [(lowest[0], m) for m in range(lowest[1], highest[1] + 1)]
-        self.assertEqual(minors, expected, "matrix has a gap in covered minors")
+    def test_checks_the_wheel_contains_every_module(self):
+        self.assertIn("missing modules", self.text)
 
-    def test_matrix_includes_the_default_interpreter(self):
-        default = re.search(r'DEFAULT_PYTHON:\s*"([^"]+)"', self.text)
-        self.assertIsNotNone(default, "release workflow has no DEFAULT_PYTHON")
-        assert default is not None
-        self.assertIn(default.group(1), self.matrix_versions())
+    def test_checks_for_build_residue(self):
+        # A wheel that swallowed .venv or .uv-cache would be enormous and
+        # would leak the build machine's layout.
+        self.assertIn("build residue", self.text)
 
-    def test_entries_are_minor_versions_not_exact_pins(self):
-        # "3.12" rather than "3.12.1": asking uv for a minor gets the newest
-        # patch release, which is what a bundle should ship.
-        for version in self.matrix_versions():
-            self.assertRegex(version, r"^\d+\.\d+$")
+    def test_lists_the_assets_before_publishing(self):
+        self.assertRegex(self.text, r"ls -la dist")
 
-    def test_matrix_does_not_exceed_what_uv_supports(self):
-        # A guard against inventing a version that does not exist yet. uv
-        # installs CPython up to and including 3.15 (currently a release
-        # candidate), so a stable-only matrix must top out at 3.14.
-        highest = self.minors()[-1]
-        self.assertLessEqual(highest, (3, 15), "matrix claims an unsupported CPython")
+    def test_publish_depends_on_the_build(self):
+        self.assertRegex(self.text, r"needs:\s*dist")
+
+    def test_does_not_build_a_bundled_runtime(self):
+        # The self-contained MSYS2 bundle was removed deliberately: packaging a
+        # ~290 MB runtime failed repeatedly on steps unrelated to this project,
+        # and a wheel that installs in seconds is worth more than shipping
+        # nothing. If bundling returns, this test should be replaced by the
+        # checks that verified the bundle actually ran.
+        self.assertNotIn("msys2-installer", self.text)
+        self.assertNotIn("pacman", self.text)
 
 
-class TestBundleIsVerifiedBeforeRelease(unittest.TestCase):
-    """The bundle job must depend on the test suite passing."""
+class TestReleaseIsVerifiedBeforePublishing(unittest.TestCase):
+    """The publish job must depend on the test suite passing."""
 
     def setUp(self):
         self.text = RELEASE.read_text(encoding="utf-8")
@@ -197,41 +118,38 @@ class TestBundleIsVerifiedBeforeRelease(unittest.TestCase):
         self.assertIn("verify", self.text)
         self.assertRegex(self.text, r"unittest discover -s tests")
 
-    def test_bundle_job_needs_verify(self):
+    def test_lint_and_format_are_checked(self):
+        self.assertRegex(self.text, r"ruff check")
+        self.assertRegex(self.text, r"ruff format --check")
+
+    def test_dist_job_needs_verify(self):
         self.assertRegex(self.text, r"needs:\s*verify")
 
-    def test_bundle_job_runs_the_tool_after_installing(self):
-        # Installing successfully is not evidence the tool works; the workflow
-        # must actually invoke it.
-        self.assertRegex(self.text, r"msys2-tree-size --version")
-        self.assertRegex(self.text, r"msys2-tree-size devices")
 
-    def test_uploads_and_attaches_the_asset(self):
-        self.assertIn("upload-artifact", self.text)
-        self.assertIn("action-gh-release", self.text)
-
-
-class TestBundleReadmeContent(unittest.TestCase):
-    """The README inside the archive is the user's first contact with it."""
+class TestInstallGuide(unittest.TestCase):
+    """The install guide is the first thing a user reads about the artifact."""
 
     def setUp(self):
-        self.text = BUNDLE_README.read_text(encoding="utf-8")
+        self.text = INSTALL_GUIDE.read_text(encoding="utf-8")
 
-    def test_documents_the_launcher_command(self):
-        self.assertIn("msys2_shell.cmd", self.text)
+    def test_documents_installation(self):
+        self.assertIn("uv tool install msys2-tree-size", self.text)
 
-    def test_documents_the_three_commands(self):
-        for command in ("du", "dupes", "devices"):
+    def test_documents_the_four_commands(self):
+        for command in ("du", "dupes", "devices", "diagnose"):
             self.assertIn(f"msys2-tree-size {command}", self.text)
 
-    def test_explains_why_msys2_is_bundled(self):
+    def test_explains_why_msys2_matters(self):
         self.assertIn("/dev/disk/by-id", self.text)
         self.assertIn("/proc/partitions", self.text)
 
-    def test_explains_that_a_sibling_console_cannot_see_devices(self):
-        # This is the single most confusing aspect of the bundle, so it must be
-        # stated rather than left for the user to discover.
+    def test_states_that_plain_windows_cannot_see_devices(self):
+        # This is the single most confusing aspect for a Windows user, so it is
+        # stated rather than left to be discovered.
         self.assertIn("cmd.exe", self.text)
+
+    def test_explains_how_to_get_archive_tools(self):
+        self.assertIn("pacman -S", self.text)
 
     def test_mentions_the_license(self):
         self.assertIn("AGPL", self.text)

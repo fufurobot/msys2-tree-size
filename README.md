@@ -6,11 +6,24 @@ directory is large.
 
 The project exists to answer three questions from a terminal:
 
-1. **Where did my disk space go?** — recursive sizes, sorted, with a tree/treemap view.
-2. **What is duplicated?** — content hashing (SHA-256) across files and whole
-   subtrees, including cross-device duplicates.
+1. **Where did my disk space go?** — recursive sizes, sorted, with a tree view.
+2. **What is duplicated?** — content hashing (SHA-256) across files.
 3. **Which physical device is it on?** — joins `/dev/disk/by-id` against
    `/proc/partitions` so results are attributed to a real drive.
+
+## Install and use
+
+```bash
+uv tool install msys2-tree-size     # gives you `msys2-tree-size` and `mts`
+msys2-tree-size du /c/Users         # where did the space go
+msys2-tree-size dupes /c/Users      # what is duplicated
+msys2-tree-size devices             # which physical disk
+msys2-tree-size diagnose            # what works on this machine
+```
+
+**See [`docs/install.md`](docs/install.md) for the full guide** — every option,
+the archive formats and how to enable them, and the one thing that only works
+inside an MSYS2 shell.
 
 ## Why MSYS2 specifically
 
@@ -41,15 +54,11 @@ This project keeps paths byte-exact through `paths.py`. See
 [`docs/design.md`](docs/design.md) for the mechanism and the measurements behind
 both points.
 
-## Install
+## Installing from a checkout
 
 ```bash
-# from a checkout
-uv run msys2-tree-size --help
-
-# or install the console script
-uv pip install -e .
-msys2-tree-size --help
+uv run msys2-tree-size --help      # run without installing
+uv pip install -e .                # or install the console script
 ```
 
 ## Usage

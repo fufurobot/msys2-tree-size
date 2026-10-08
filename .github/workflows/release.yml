@@ -1,6 +1,17 @@
 name: Release
 
-# Tagging is the release trigger: `git tag v0.1.0 && git push origin v0.1.0`.
+# Tagging is the release trigger: `git tag v0.2.0 && git push origin v0.2.0`.
+#
+# The published assets are the Python wheel and sdist. They install with
+# `uv tool install` on any machine that has MSYS2, which is enough for every
+# command: the MSYS2-specific behaviour (device enumeration via /dev/disk/by-id,
+# and POSIX path handling) comes from the environment the tool runs in, not
+# from anything bundled with it.
+#
+# A self-contained MSYS2 bundle is deliberately NOT built here. Packaging a
+# ~290 MB, ~16k-file runtime failed repeatedly on steps unrelated to this
+# project, and shipping a wheel that installs in seconds is worth more than
+# shipping nothing. See docs/design.md for the trade-off.
 on:
   push:
     tags: ["v*"]
@@ -13,17 +24,8 @@ on:
 permissions:
   contents: write
 
-env:
-  MSYSTEM: CLANG64
-  # The CPython minor versions bundled. These are native Windows builds supplied
-  # by uv, and the list is checked against what the bundled uv can actually
-  # install, so an unavailable version fails loudly instead of being skipped.
-  PYTHON_MATRIX: "3.9 3.10 3.11 3.12 3.13 3.14"
-  # The interpreter the shipped console script is pinned to.
-  DEFAULT_PYTHON: "3.13"
-
 jobs:
-  # Do not publish a bundle for a commit that does not pass its own tests.
+  # Do not publish artifacts for a commit that does not pass its own tests.
   verify:
     name: verify before release
     runs-on: ubuntu-latest
@@ -34,319 +36,91 @@ jobs:
       - run: uvx ruff check src tests
       - run: uvx ruff format --check src tests
 
-  # Build the portable bundle from a *pristine* MSYS2 runtime downloaded here in
-  # CI, never from anyone's local installation, so the artifact is reproducible
-  # from a clean checkout.
-  #
-  # Python inside the bundle is a native Windows CPython supplied by uv, not
-  # MSYS2's own python package. Two measured reasons:
-  #
-  #   1. Installing into MSYS2's python fails with PEP 668
-  #      `externally-managed-environment`.
-  #   2. uv refuses MSYS2's python outright as
-  #      `Unknown operating system: mingw_x86_64_ucrt_llvm`.
-  #
-  # uv creates and owns its own environment, so the externally-managed guard is
-  # respected rather than bypassed, and uv itself comes from MSYS2's repository.
-  bundle:
-    name: build portable MSYS2 bundle
+  # Build and smoke-test the distributions, then prove they install cleanly.
+  dist:
+    name: build and verify distributions
     needs: verify
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download the official MSYS2 base archive
-        shell: pwsh
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build the wheel and sdist
+        run: uv build
+
+      - name: Check the distribution metadata
+        run: uvx twine check dist/*
+
+      - name: Install the wheel and run it
         run: |
-          $ErrorActionPreference = "Stop"
+          uv tool install --force --from dist/*.whl msys2-tree-size
+          "$(uv tool dir --bin)/msys2-tree-size" --version
+          "$(uv tool dir --bin)/msys2-tree-size" diagnose
+          "$(uv tool dir --bin)/msys2-tree-size" du . --flat --top 3
 
-          $release = Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/msys2/msys2-installer/releases/latest" `
-            -Headers @{ "User-Agent" = "msys2-tree-size-release" }
+      - name: Install the sdist and run it
+        run: |
+          uv tool install --force --from dist/*.tar.gz msys2-tree-size
+          "$(uv tool dir --bin)/msys2-tree-size" --version
 
-          $asset = $release.assets |
-            Where-Object { $_.name -like "msys2-base-x86_64-*.sfx.exe" } |
-            Select-Object -First 1
-          if (-not $asset) { throw "no msys2-base sfx asset found in $($release.tag_name)" }
+      - name: Confirm the wheel contains every module
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
 
-          Write-Host "MSYS2 release : $($release.tag_name)"
-          Write-Host "asset         : $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB)"
-
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile msys2-base.sfx.exe
-
-          # The SFX extracts to .\msys64 relative to the working directory.
-          Start-Process -FilePath .\msys2-base.sfx.exe -ArgumentList "-y" -Wait -NoNewWindow
-
-          if (-not (Test-Path .\msys64\msys2_shell.cmd)) {
-            throw "extraction did not produce msys64\msys2_shell.cmd"
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          expected = {
+              "__init__", "archive", "cli", "devices", "duplicates",
+              "formats", "hashing", "paths", "report", "sizes", "walk",
           }
-          "MSYS2_ROOT=$PWD\msys64" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Install uv from the MSYS2 repository
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $shell = Join-Path $env:MSYS2_ROOT "msys2_shell.cmd"
-
-          & $shell -defterm -no-start -clang64 -here -c "pacman -Sy --noconfirm"
-          if ($LASTEXITCODE -ne 0) { throw "pacman -Sy failed ($LASTEXITCODE)" }
-
-          # uv comes from MSYS2 itself and is then used to fetch the Python
-          # runtime, so no MSYS2 python package is installed at all.
-          & $shell -defterm -no-start -clang64 -here -c "pacman -S --noconfirm --needed mingw-w64-clang-x86_64-uv"
-          if ($LASTEXITCODE -ne 0) { throw "pacman -S uv failed ($LASTEXITCODE)" }
-
-          # Archive helpers. Python's stdlib already covers tar and zip; these
-          # add 7z and rar, which have no stdlib reader. bsdtar and zstd are
-          # already present in the base runtime.
-          & $shell -defterm -no-start -clang64 -here -c "pacman -S --noconfirm --needed mingw-w64-clang-x86_64-7zip mingw-w64-clang-x86_64-unrar"
-          if ($LASTEXITCODE -ne 0) { throw "pacman -S archive tools failed ($LASTEXITCODE)" }
-
-          & $shell -defterm -no-start -clang64 -here -c "uv --version"
-          if ($LASTEXITCODE -ne 0) { throw "uv is not runnable inside the bundle" }
-
-      - name: Report the archive backends available in the bundle
-        shell: pwsh
-        run: |
-          $shell = Join-Path $env:MSYS2_ROOT "msys2_shell.cmd"
-          # Which tools exist decides which formats the shipped bundle can read,
-          # so the list is recorded in the build log rather than assumed.
-          & $shell -defterm -no-start -clang64 -here -c "for t in bsdtar 7z unrar zstd xz unzip; do printf '  %-8s -> ' \$t; command -v \$t || echo '(absent)'; done"
-
-      - name: Show which Python versions the bundled uv provides
-        shell: pwsh
-        run: |
-          $shell = Join-Path $env:MSYS2_ROOT "msys2_shell.cmd"
-          & $shell -defterm -no-start -clang64 -here -c "uv python list | grep -E 'windows-x86_64-none' | grep -v freethreaded | head -n 20"
-
-      # Build and verify the project against every supported CPython. uv keeps
-      # its Python installs and environments inside the bundle, so the shipped
-      # tree is self-contained and nothing is read from the build user's profile.
-      #
-      # The work is written to a shell script rather than passed through
-      # `msys2_shell.cmd -c "..."`: nesting a `python -c "..."` inside that
-      # argument requires escaping that PowerShell and cmd.exe both mangle, and
-      # a mangled command fails with a bare exit code that says nothing.
-      - name: Build against the CPython matrix
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $shell = Join-Path $env:MSYS2_ROOT "msys2_shell.cmd"
-          $posix = $env:GITHUB_WORKSPACE -replace '\\', '/'
-          $posix = "/$($posix.Substring(0,1).ToLower())$($posix.Substring(2))"
-
-          $script = @"
-          set -eu
-          export UV_PYTHON_INSTALL_DIR=/clang64/uv-python
-          export UV_TOOL_DIR=/clang64/uv-tools
-          export UV_CACHE_DIR=/clang64/uv-cache
-          export UV_LINK_MODE=copy
-          cd '$posix'
-          for version in ${{ env.PYTHON_MATRIX }}; do
-            echo "::group::CPython \$version"
-            uv run --python "\$version" --with . python -c 'import sys; print("OK", sys.version.split()[0], sys.platform)'
-            echo "::endgroup::"
-          done
-          "@
-          $scriptPath = Join-Path $env:RUNNER_TEMP "matrix.sh"
-          # LF endings: a script with CRLF breaks `set -eu` on the first line.
-          [System.IO.File]::WriteAllText($scriptPath, $script.Replace("`r`n", "`n"))
-
-          $posixScript = $scriptPath -replace '\\', '/'
-          $posixScript = "/$($posixScript.Substring(0,1).ToLower())$($posixScript.Substring(2))"
-
-          & $shell -defterm -no-start -clang64 -here -c "bash $posixScript"
-          if ($LASTEXITCODE -ne 0) { throw "CPython matrix build failed ($LASTEXITCODE)" }
-
-      - name: Install the console script into the bundle
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $shell = Join-Path $env:MSYS2_ROOT "msys2_shell.cmd"
-          $posix = $env:GITHUB_WORKSPACE -replace '\\', '/'
-          $posix = "/$($posix.Substring(0,1).ToLower())$($posix.Substring(2))"
-
-          # The default interpreter is the one baked into the bundle, so a user
-          # running msys2-tree-size gets a working command with no setup.
-          #
-          # UV_TOOL_BIN_DIR puts the executables inside the bundle. The default
-          # (~/.local/bin) is outside it and is not on the MSYS2 PATH, which
-          # made the freshly installed command invisible to the next step.
-          $script = @"
-          set -eu
-          export UV_PYTHON_INSTALL_DIR=/clang64/uv-python
-          export UV_TOOL_DIR=/clang64/uv-tools
-          export UV_TOOL_BIN_DIR=/clang64/bin
-          export UV_CACHE_DIR=/clang64/uv-cache
-          export UV_LINK_MODE=copy
-          cd '$posix'
-          uv tool install --python ${{ env.DEFAULT_PYTHON }} --force .
-          "@
-          $scriptPath = Join-Path $env:RUNNER_TEMP "install.sh"
-          [System.IO.File]::WriteAllText($scriptPath, $script.Replace("`r`n", "`n"))
-
-          $posixScript = $scriptPath -replace '\\', '/'
-          $posixScript = "/$($posixScript.Substring(0,1).ToLower())$($posixScript.Substring(2))"
-
-          & $shell -defterm -no-start -clang64 -here -c "bash $posixScript"
-          if ($LASTEXITCODE -ne 0) { throw "uv tool install failed ($LASTEXITCODE)" }
-
-          # Prove the executable really landed where the bundle expects, rather
-          # than trusting that the install reported success.
-          $exe = Join-Path $env:MSYS2_ROOT "clang64\bin\msys2-tree-size.exe"
-          if (-not (Test-Path $exe)) { throw "console script not found at $exe" }
-          Write-Host "console script: $exe"
-
-      - name: Verify the tool runs from inside the bundle
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $shell = Join-Path $env:MSYS2_ROOT "msys2_shell.cmd"
-
-          # `devices` is the reason MSYS2 is bundled at all: it needs the
-          # runtime's virtual /dev and /proc, which no plain Win32 process can
-          # read without going through the MSYS2 runtime.
-          #
-          # The work runs from a script file so that a failure reports the real
-          # error instead of a bare exit code from a mangled command line.
-          #
-          # There is deliberately no system `python` in the bundle: uv owns the
-          # interpreter, so anything needing Python goes through `uv run`.
-          $script = @'
-          set -eu
-          echo "--- version ---"
-          msys2-tree-size --version
-          echo "--- devices ---"
-          msys2-tree-size devices
-          echo "--- du ---"
-          msys2-tree-size du src --flat --top 3
-          echo "--- archives ---"
-          msys2-tree-size du src --flat --archives --top 3
-          echo "--- backends ---"
-          msys2-tree-size diagnose
-          '@
-          $scriptPath = Join-Path $env:RUNNER_TEMP "verify.sh"
-          [System.IO.File]::WriteAllText($scriptPath, $script.Replace("`r`n", "`n"))
-
-          $posixScript = $scriptPath -replace '\\', '/'
-          $posixScript = "/$($posixScript.Substring(0,1).ToLower())$($posixScript.Substring(2))"
-
-          & $shell -defterm -no-start -clang64 -here -c "bash $posixScript" | Write-Host
-          if ($LASTEXITCODE -ne 0) { throw "verification inside the bundle failed ($LASTEXITCODE)" }
-
-      - name: Write the convenience launcher
-        shell: pwsh
-        run: |
-          $content = @(
-            '@echo off',
-            'REM Convenience launcher: runs msys2-tree-size inside the bundled',
-            'REM MSYS2 runtime, which is required for device enumeration.',
-            '"%~dp0msys2_shell.cmd" -defterm -no-start -clang64 -here -c "msys2-tree-size %*"'
-          )
-          $content | Set-Content (Join-Path $env:MSYS2_ROOT "msys2-tree-size.cmd") -Encoding ascii
-
-      - name: Trim the bundle
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $root = $env:MSYS2_ROOT
-
-          # Package caches and the uv download cache are build residue; the
-          # runtime itself is untouched.
-          foreach ($relative in @(
-              "var\cache\pacman\pkg",
-              "var\lib\pacman\sync",
-              "clang64\var\cache\pacman\pkg",
-              "clang64\uv-cache",
-              "mingw64\var\cache\pacman\pkg",
-              "ucrt64\var\cache\pacman\pkg"
-          )) {
-            $path = Join-Path $root $relative
-            if (Test-Path $path) {
-              Write-Host "removing $relative"
-              Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
-            }
+          present = {
+              n.rsplit("/", 1)[-1][:-3]
+              for n in names
+              if n.startswith("msys2_tree_size/") and n.endswith(".py")
           }
+          missing = expected - present
+          if missing:
+              sys.exit(f"wheel is missing modules: {sorted(missing)}")
+          stray = [n for n in names if any(
+              x in n for x in (".venv", ".uv-cache", "__pycache__", ".tmp/"))]
+          if stray:
+              sys.exit(f"wheel contains build residue: {stray}")
+          print(f"wheel ok: {len(present)} modules, no build residue")
+          PY
 
-          Get-ChildItem $root -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-
-      - name: Write the bundle README
-        shell: pwsh
-        run: Copy-Item docs/bundle-README.md (Join-Path $env:MSYS2_ROOT "README.md") -Force
-
-      - name: Record what is inside the bundle
-        shell: pwsh
-        run: |
-          # Not -Stop: this walks ~16k files including NTFS reparse points, and
-          # hashing a link or a locked file throws. Those are skipped and
-          # counted rather than aborting the release.
-          $ErrorActionPreference = "Continue"
-          $root = $env:MSYS2_ROOT
-
-          $files = Get-ChildItem $root -Recurse -Force -File -ErrorAction SilentlyContinue
-          $bytes = ($files | Measure-Object -Property Length -Sum).Sum
-          Write-Host "files : $($files.Count)"
-          Write-Host "size  : $([math]::Round($bytes / 1MB, 1)) MB"
-
-          $lines = [System.Collections.Generic.List[string]]::new()
-          $skipped = 0
-          foreach ($file in $files) {
-            try {
-              $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-              $relative = $file.FullName.Substring($root.Length + 1)
-              $lines.Add("$($hash.ToLower())  $relative")
-            } catch {
-              $skipped++
-            }
-          }
-          Write-Host "hashed: $($lines.Count), skipped: $skipped"
-
-          # A manifest that silently omits files is worse than none, so the
-          # skip count is surfaced and an implausible result fails the build.
-          if ($lines.Count -lt 1000) { throw "manifest is implausibly small ($($lines.Count) entries)" }
-
-          $sorted = $lines | Sort-Object
-          [System.IO.File]::WriteAllLines(
-            (Join-Path $root "MANIFEST.sha256"),
-            $sorted
-          )
-
-      - name: Package the bundle
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $tag = "${{ github.ref_name }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $tag = "${{ inputs.tag }}" }
-          $name = "msys2-tree-size-$tag-windows-x86_64-clang64"
-
-          # 7z rather than Compress-Archive: the bundle is ~300 MB across ~16k
-          # files, which the cmdlet handles slowly and without recovery, while
-          # 7z is already installed in the bundle and produces a smaller file.
-          $sevenZip = Join-Path $env:MSYS2_ROOT "clang64\bin\7z.exe"
-          if (-not (Test-Path $sevenZip)) { throw "7z not found at $sevenZip" }
-
-          & $sevenZip a -tzip -mx=5 -bso0 -bsp0 "$name.zip" $env:MSYS2_ROOT
-          if ($LASTEXITCODE -ne 0) { throw "7z packaging failed ($LASTEXITCODE)" }
-
-          $size = (Get-Item "$name.zip").Length
-          Write-Host "archive: $name.zip ($([math]::Round($size / 1MB, 1)) MB)"
-          if ($size -lt 5MB) { throw "archive suspiciously small; the bundle is probably incomplete" }
-
-          "ASSET_NAME=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Upload the bundle as a workflow artifact
+      - name: Upload the distributions
         uses: actions/upload-artifact@v4
         with:
-          name: portable-bundle
-          path: ${{ env.ASSET_NAME }}
+          name: dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
           if-no-files-found: error
 
-      - name: Attach the bundle to the release
+  publish:
+    name: publish the release
+    needs: dist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: List the assets
+        run: ls -la dist
+
+      - name: Attach the distributions to the release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          files: ${{ env.ASSET_NAME }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           draft: false
           generate_release_notes: true
           fail_on_unmatched_files: true
