@@ -278,15 +278,39 @@ jobs:
       - name: Record what is inside the bundle
         shell: pwsh
         run: |
+          # Not -Stop: this walks ~16k files including NTFS reparse points, and
+          # hashing a link or a locked file throws. Those are skipped and
+          # counted rather than aborting the release.
+          $ErrorActionPreference = "Continue"
           $root = $env:MSYS2_ROOT
+
           $files = Get-ChildItem $root -Recurse -Force -File -ErrorAction SilentlyContinue
           $bytes = ($files | Measure-Object -Property Length -Sum).Sum
           Write-Host "files : $($files.Count)"
           Write-Host "size  : $([math]::Round($bytes / 1MB, 1)) MB"
 
-          $lines = $files |
-            ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring($root.Length + 1) }
-          $lines | Sort-Object | Set-Content (Join-Path $root "MANIFEST.sha256") -Encoding utf8
+          $lines = [System.Collections.Generic.List[string]]::new()
+          $skipped = 0
+          foreach ($file in $files) {
+            try {
+              $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+              $relative = $file.FullName.Substring($root.Length + 1)
+              $lines.Add("$($hash.ToLower())  $relative")
+            } catch {
+              $skipped++
+            }
+          }
+          Write-Host "hashed: $($lines.Count), skipped: $skipped"
+
+          # A manifest that silently omits files is worse than none, so the
+          # skip count is surfaced and an implausible result fails the build.
+          if ($lines.Count -lt 1000) { throw "manifest is implausibly small ($($lines.Count) entries)" }
+
+          $sorted = $lines | Sort-Object
+          [System.IO.File]::WriteAllLines(
+            (Join-Path $root "MANIFEST.sha256"),
+            $sorted
+          )
 
       - name: Package the bundle
         shell: pwsh
@@ -296,7 +320,14 @@ jobs:
           if ("${{ github.event_name }}" -eq "workflow_dispatch") { $tag = "${{ inputs.tag }}" }
           $name = "msys2-tree-size-$tag-windows-x86_64-clang64"
 
-          Compress-Archive -Path $env:MSYS2_ROOT -DestinationPath "$name.zip" -CompressionLevel Optimal
+          # 7z rather than Compress-Archive: the bundle is ~300 MB across ~16k
+          # files, which the cmdlet handles slowly and without recovery, while
+          # 7z is already installed in the bundle and produces a smaller file.
+          $sevenZip = Join-Path $env:MSYS2_ROOT "clang64\bin\7z.exe"
+          if (-not (Test-Path $sevenZip)) { throw "7z not found at $sevenZip" }
+
+          & $sevenZip a -tzip -mx=5 -bso0 -bsp0 "$name.zip" $env:MSYS2_ROOT
+          if ($LASTEXITCODE -ne 0) { throw "7z packaging failed ($LASTEXITCODE)" }
 
           $size = (Get-Item "$name.zip").Length
           Write-Host "archive: $name.zip ($([math]::Round($size / 1MB, 1)) MB)"
