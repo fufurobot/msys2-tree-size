@@ -96,8 +96,22 @@ jobs:
           & $shell -defterm -no-start -clang64 -here -c "pacman -S --noconfirm --needed mingw-w64-clang-x86_64-uv"
           if ($LASTEXITCODE -ne 0) { throw "pacman -S uv failed ($LASTEXITCODE)" }
 
+          # Archive helpers. Python's stdlib already covers tar and zip; these
+          # add 7z and rar, which have no stdlib reader. bsdtar and zstd are
+          # already present in the base runtime.
+          & $shell -defterm -no-start -clang64 -here -c "pacman -S --noconfirm --needed mingw-w64-clang-x86_64-7zip mingw-w64-clang-x86_64-unrar"
+          if ($LASTEXITCODE -ne 0) { throw "pacman -S archive tools failed ($LASTEXITCODE)" }
+
           & $shell -defterm -no-start -clang64 -here -c "uv --version"
           if ($LASTEXITCODE -ne 0) { throw "uv is not runnable inside the bundle" }
+
+      - name: Report the archive backends available in the bundle
+        shell: pwsh
+        run: |
+          $shell = Join-Path $env:MSYS2_ROOT "msys2_shell.cmd"
+          # Which tools exist decides which formats the shipped bundle can read,
+          # so the list is recorded in the build log rather than assumed.
+          & $shell -defterm -no-start -clang64 -here -c "for t in bsdtar 7z unrar zstd xz unzip; do printf '  %-8s -> ' \$t; command -v \$t || echo '(absent)'; done"
 
       - name: Show which Python versions the bundled uv provides
         shell: pwsh

@@ -35,6 +35,9 @@ msys2-tree-size du /c/Users --depth 2 --top 20 --flat
 # machine-readable output
 msys2-tree-size du /c/Users --json report.json
 
+# look inside archives and account for what they hold
+msys2-tree-size du /c/Users --archives
+
 # find duplicate files by content hash
 msys2-tree-size dupes /c/Users --min-size 1M
 
@@ -45,6 +48,29 @@ msys2-tree-size devices
 Paths may be written either way; `/c/Users` and `C:\Users` are the same place.
 
 Run `msys2-tree-size --help` or `msys2-tree-size du --help` for the full list.
+
+## Reading inside archives
+
+`--archives` opens archive files and adds their contents to the totals, which
+matters when a folder holds tarballs rather than loose files:
+
+```
+273B    1.49%  file  backup/bundle.zip
+   2.6K  14.74%  file  backup/bundle.zip::data/big.bin
+```
+
+`bundle.zip::data/big.bin` means "a member of bundle.zip". Nothing is extracted
+to disk: only the archive's index is read, so scanning an untrusted tree cannot
+write files.
+
+This bundle ships `7z` and `unrar` alongside Python's own `tar`/`zip` support,
+so the readable formats are `tar`, `tar.gz`, `tar.bz2`, `tar.xz`, `tar.zst`,
+`zip`, `jar`, `apk`, `docx`, `xlsx`, `pptx`, `odt`/`ods`/`odp`, `epub`, `whl`,
+`7z`, `rar`, and bare `.gz`/`.xz`/`.zst`/`.bz2`.
+
+Penetration is off unless asked for, because opening every archive can be slow.
+Use `--archive-depth` to bound nested archives and `--max-archive-size` to skip
+large ones.
 
 ## Why MSYS2 is bundled
 

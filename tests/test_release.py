@@ -114,6 +114,12 @@ class TestBundleIsBuiltFromADownload(unittest.TestCase):
         for variable in ("UV_PYTHON_INSTALL_DIR", "UV_TOOL_DIR"):
             self.assertIn(variable, self.text)
 
+    def test_installs_the_archive_tools_the_bundle_promises(self):
+        # The bundle README advertises 7z and rar support, so the packages
+        # providing them must actually be installed or the documentation lies.
+        self.assertRegex(self.text, r"pacman -S[^\n]*mingw-w64-clang-x86_64-7zip")
+        self.assertRegex(self.text, r"pacman -S[^\n]*mingw-w64-clang-x86_64-unrar")
+
 
 class TestPythonMatrix(unittest.TestCase):
     """The bundle must cover every CPython newest uv supports.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "msys2-tree-size"
-version = "0.1.0"
+version = "0.2.0"
 description = "A CLI re-implementation of TreeSize for MSYS2: recursive disk usage, hashing and duplicate detection"
 readme = "README.md"
 license = { file = "LICENSE" }

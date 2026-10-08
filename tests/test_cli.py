@@ -60,9 +60,14 @@ class TestParser(CliTestCase):
         self.assertIn("nonsense", err)
 
     def test_version_is_reported(self):
+        from msys2_tree_size import __version__
+
         code, out, _ = self.run_cli("--version")
         self.assertEqual(code, 0)
-        self.assertIn("0.1.0", out)
+        # Read the version rather than hardcoding it, so bumping a release does
+        # not require editing a CLI test.
+        self.assertIn(__version__, out)
+        self.assertIn("msys2-tree-size", out)
 
     def test_subcommands_are_registered(self):
         parser = cli.build_parser()

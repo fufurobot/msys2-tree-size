@@ -15,4 +15,4 @@ from .walk import walk as walk_tree
 
 __all__ = ["Entry", "walk_tree", "__version__"]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
