@@ -81,3 +81,7 @@ ignore = [
 # tarfile/zipfile opens: the handle has to be created inside a try/except and
 # only then handed to `with`, which is what closes it.
 "src/msys2_tree_size/archive.py" = ["PTH", "SIM115"]
+# index.py stats paths that may contain lone surrogates, so it goes through
+# paths.encode_path/resolve_for_os and os.stat rather than pathlib, for the
+# same reason as the walk.
+"src/msys2_tree_size/index.py" = ["PTH"]
