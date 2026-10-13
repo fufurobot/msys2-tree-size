@@ -14,13 +14,10 @@ which is the entire thing being built.
 
 from __future__ import annotations
 
-import os
-import sqlite3
 import time
 import unittest
 
 from msys2_tree_size import index
-
 from support import TempDirTestCase
 
 
@@ -160,9 +157,7 @@ class TestDirectoryState(IndexTestCase):
     def test_options_are_recorded_and_compared(self):
         conn = index.connect(self.db)
         index.record_directory(conn, "/r", mtime_ns=1, options="hash=True,archives=False")
-        self.assertEqual(
-            index.directory_options(conn, "/r"), "hash=True,archives=False"
-        )
+        self.assertEqual(index.directory_options(conn, "/r"), "hash=True,archives=False")
         conn.close()
 
 
@@ -200,12 +195,16 @@ class TestIncrementalDecisions(IndexTestCase):
         self.assertFalse(index.should_skip("/r", stored_ns=100, current_ns=200, options_match=True))
 
     def test_never_indexed_directory_is_not_skipped(self):
-        self.assertFalse(index.should_skip("/r", stored_ns=None, current_ns=200, options_match=True))
+        self.assertFalse(
+            index.should_skip("/r", stored_ns=None, current_ns=200, options_match=True)
+        )
 
     def test_option_mismatch_forces_a_rescan(self):
         # Rows produced with --archives differ from rows without it, so reusing
         # them would silently mix two different datasets.
-        self.assertFalse(index.should_skip("/r", stored_ns=100, current_ns=100, options_match=False))
+        self.assertFalse(
+            index.should_skip("/r", stored_ns=100, current_ns=100, options_match=False)
+        )
 
 
 class TestRescanning(IndexTestCase):
@@ -298,14 +297,41 @@ class TestIncrementalRescan(IndexTestCase):
         (tree / "other" / "c.txt").write_bytes(b"c" * 50)
 
         conn = index.connect(self.db)
-        index.rescan(conn, self.key(tree), hash_contents=False)
+        first = index.rescan(conn, self.key(tree), hash_contents=False)
+        self.assertEqual(first.directories_walked, 3)  # tree itself, sub, other
 
-        # Second run with no changes at all: nothing should be walked.
+        # Second run with no changes: only the root may be listed, because it
+        # has no parent to vouch for it. Every *child* directory must be skipped
+        # without being listed at all -- that is the optimisation.
         stats = index.rescan(conn, self.key(tree), hash_contents=False)
         self.assertEqual(
             stats.directories_walked,
-            0,
-            "an unchanged tree was re-walked; the index is not incremental",
+            1,
+            "an unchanged tree was fully re-walked; the index is not incremental",
+        )
+        self.assertEqual(stats.directories_skipped, 2)  # sub and other
+        conn.close()
+
+    def test_second_scan_does_far_less_work_than_the_first(self):
+        # The headline property, asserted as a ratio rather than an exact count
+        # so it stays meaningful as the implementation evolves.
+        root = self.make_temp_dir()
+        for i in range(10):
+            branch = root / f"branch{i}"
+            branch.mkdir()
+            for j in range(5):
+                (branch / f"f{j}.txt").write_bytes(b"x" * 10)
+
+        conn = index.connect(self.db)
+        first = index.rescan(conn, self.key(root), hash_contents=False)
+        second = index.rescan(conn, self.key(root), hash_contents=False)
+
+        self.assertGreater(first.directories_walked, 10)
+        self.assertLessEqual(
+            second.directories_walked,
+            2,
+            f"rescan walked {second.directories_walked} directories; "
+            "an unchanged tree should need at most the root",
         )
         conn.close()
 
@@ -318,9 +344,7 @@ class TestIncrementalRescan(IndexTestCase):
         (tree / "added.txt").write_bytes(b"x" * 10)
 
         stats = index.rescan(conn, self.key(tree), hash_contents=False)
-        self.assertGreater(
-            stats.directories_walked, 0, "a changed directory was not re-walked"
-        )
+        self.assertGreater(stats.directories_walked, 0, "a changed directory was not re-walked")
         conn.close()
 
     def test_a_change_deep_in_a_subtree_only_re_walks_that_branch(self):
@@ -393,9 +417,7 @@ class TestQueries(IndexTestCase):
         index.rescan(conn, self.key(tree), hash_contents=False)
 
         found = {row.path for row in index.find(conn, "*.txt")}
-        self.assertEqual(
-            found, {self.key(tree / "a.txt"), self.key(tree / "sub" / "b.txt")}
-        )
+        self.assertEqual(found, {self.key(tree / "a.txt"), self.key(tree / "sub" / "b.txt")})
         conn.close()
 
     def test_find_by_substring(self):
@@ -413,7 +435,23 @@ class TestQueries(IndexTestCase):
         index.rescan(conn, self.key(tree), hash_contents=False)
 
         found = {row.path for row in index.find(conn, "*", under=self.key(tree / "sub"))}
-        self.assertEqual(found, {self.key(tree / "sub" / "b.txt")})
+        # The subtree root itself is included, which is what "under" means; a
+        # component-aware match is used so /tree/sub does not also pull in a
+        # sibling called /tree/submarine.
+        self.assertEqual(found, {self.key(tree / "sub"), self.key(tree / "sub" / "b.txt")})
+        conn.close()
+
+    def test_find_under_does_not_match_a_sibling_prefix(self):
+        tree = self.make_tree()
+        (tree / "submarine").mkdir()
+        (tree / "submarine" / "c.txt").write_bytes(b"c" * 10)
+
+        conn = index.connect(self.db)
+        index.rescan(conn, self.key(tree), hash_contents=False)
+
+        found = {row.path for row in index.find(conn, "*", under=self.key(tree / "sub"))}
+        self.assertNotIn(self.key(tree / "submarine"), found)
+        self.assertNotIn(self.key(tree / "submarine" / "c.txt"), found)
         conn.close()
 
     def test_find_returns_nothing_for_no_match(self):
